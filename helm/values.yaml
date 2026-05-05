@@ -1,0 +1,28 @@
+replicaCount: 1
+
+image:
+  repository: datashuttle/playground
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to .Chart.AppVersion
+
+service:
+  type: ClusterIP
+  port: 8081
+
+env:
+  RUST_LOG: info
+  PLAYGROUND_BIND_ADDR: 0.0.0.0:8081
+
+# Mount a Kubernetes Secret with the bearer token to require auth.
+# Leave authToken.existingSecret empty to run unauthenticated (dev only).
+authToken:
+  existingSecret: ""
+  secretKey: token
+
+resources: {}
+
+probes:
+  liveness:
+    path: /health
+  readiness:
+    path: /health

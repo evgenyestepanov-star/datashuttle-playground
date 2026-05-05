@@ -1,0 +1,19 @@
+services:
+  playground:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: datashuttle/playground:dev
+    ports:
+      - "8081:8081"
+    environment:
+      RUST_LOG: info
+      # Set PLAYGROUND_TOKEN to require Authorization: Bearer <token>
+      # PLAYGROUND_TOKEN: replace-me
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/datashuttle-playground-server", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped

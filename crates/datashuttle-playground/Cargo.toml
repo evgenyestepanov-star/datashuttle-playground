@@ -1,0 +1,29 @@
+[package]
+name = "datashuttle-playground"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Interactive playground runtime (sessions / TCP dispatcher / quota / metrics) for DataShuttle. Standalone-extracted in Phase 5.A."
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+prometheus.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

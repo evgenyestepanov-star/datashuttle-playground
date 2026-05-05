@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://datashuttle.ai/schemas/playground-manifest-v1.json",
+  "title": "DataShuttle Playground Manifest",
+  "description": "Single source of truth for playground sources and scenarios. Consumed by the API, the UI gallery, the CLI, and the mdbook docs generator.",
+  "type": "object",
+  "required": ["version", "sources", "scenarios"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind", "status", "free"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["cdc", "snapshot", "streaming", "file", "rest", "kv"] },
+          "status": { "type": "string", "enum": ["stable", "beta", "excluded"] },
+          "free": { "type": "boolean" },
+          "docker_service": { "type": "string" },
+          "docker_profile": { "type": "string" },
+          "prerequisites": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "image": { "type": "string" }
+        }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source_id", "title", "description", "difficulty", "tier", "status", "prerequisites"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "source_id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "difficulty": { "type": "string", "enum": ["beginner", "intermediate", "advanced"] },
+          "tier": { "type": "integer", "minimum": 1, "maximum": 4 },
+          "status": { "type": "string", "enum": ["stable", "beta", "hidden"] },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "prerequisites": {
+            "type": "object",
+            "properties": {
+              "deployment": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["dev", "self-managed", "cloud"] }
+              },
+              "profiles": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "min_memory_mb": { "type": "integer", "minimum": 128 }
+            }
+          },
+          "init_sql": { "type": "string" },
+          "shuttle_sql": { "type": "string" },
+          "teardown_sql": { "type": "string" },
+          "estimated_duration_s": { "type": "integer", "minimum": 10 },
+          "actions": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Action" }
+          },
+          "break_scenarios": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Action" }
+          },
+          "expected_outcomes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["metric", "assertion"],
+              "properties": {
+                "metric": { "type": "string" },
+                "assertion": { "type": "string" },
+                "value": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "Action": {
+      "type": "object",
+      "required": ["id", "label", "kind"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "sql",
+            "shell",
+            "http",
+            "produce-kafka",
+            "upload-file",
+            "toxiproxy",
+            "reset-snapshot"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "enum": ["source", "target", "kafka", "s3", "rest", "ops"]
+        },
+        "sql": { "type": "string" },
+        "sql_file": { "type": "string" },
+        "shell_cmd": { "type": "string" },
+        "http_request": {
+          "type": "object",
+          "properties": {
+            "method": { "type": "string" },
+            "url": { "type": "string" },
+            "body": {}
+          }
+        },
+        "payload_file": { "type": "string" },
+        "repeat": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "expected_dlq": { "type": "boolean" },
+        "destructive": { "type": "boolean" }
+      }
+    }
+  }
+}

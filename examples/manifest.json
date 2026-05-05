@@ -1,0 +1,1160 @@
+{
+  "$schema": "./manifest.schema.json",
+  "version": 1,
+  "sources": [
+    {
+      "id": "in-memory",
+      "name": "In-process generator",
+      "kind": "streaming",
+      "status": "stable",
+      "free": true
+    },
+    {
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "kind": "cdc",
+      "status": "stable",
+      "free": true,
+      "docker_service": "postgres",
+      "image": "postgres:16",
+      "prerequisites": [
+        "docker"
+      ]
+    },
+    {
+      "id": "clickhouse",
+      "name": "ClickHouse",
+      "kind": "snapshot",
+      "status": "stable",
+      "free": true,
+      "docker_service": "clickhouse",
+      "docker_profile": "clickhouse",
+      "image": "clickhouse/clickhouse-server:24.8",
+      "prerequisites": [
+        "docker",
+        "profile=clickhouse"
+      ]
+    },
+    {
+      "id": "kafka",
+      "name": "Kafka (Redpanda)",
+      "kind": "streaming",
+      "status": "stable",
+      "free": true,
+      "docker_service": "redpanda",
+      "docker_profile": "playground",
+      "image": "redpandadata/redpanda:latest",
+      "prerequisites": [
+        "docker",
+        "profile=playground"
+      ]
+    },
+    {
+      "id": "mysql",
+      "name": "MySQL",
+      "kind": "cdc",
+      "status": "beta",
+      "free": true,
+      "docker_service": "mysql",
+      "docker_profile": "full",
+      "image": "mysql:8.4",
+      "prerequisites": [
+        "docker",
+        "profile=full"
+      ]
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "kind": "cdc",
+      "status": "beta",
+      "free": true,
+      "docker_service": "mongodb",
+      "docker_profile": "full",
+      "image": "mongo:7",
+      "prerequisites": [
+        "docker",
+        "profile=full",
+        "replica-set-initiated"
+      ]
+    },
+    {
+      "id": "s3-file",
+      "name": "S3 files (MinIO)",
+      "kind": "file",
+      "status": "beta",
+      "free": true,
+      "docker_service": "minio",
+      "image": "minio/minio:latest",
+      "prerequisites": [
+        "docker",
+        "mc-cli-optional"
+      ]
+    },
+    {
+      "id": "cassandra",
+      "name": "Cassandra",
+      "kind": "cdc",
+      "status": "beta",
+      "free": true,
+      "docker_service": "cassandra",
+      "docker_profile": "playground",
+      "image": "cassandra:5",
+      "prerequisites": [
+        "docker",
+        "profile=playground"
+      ]
+    },
+    {
+      "id": "dynamodb-local",
+      "name": "DynamoDB (local)",
+      "kind": "kv",
+      "status": "beta",
+      "free": true,
+      "docker_service": "dynamodb-local",
+      "docker_profile": "playground",
+      "image": "amazon/dynamodb-local:latest",
+      "prerequisites": [
+        "docker",
+        "profile=playground",
+        "awscli-optional"
+      ]
+    },
+    {
+      "id": "localstack-kinesis",
+      "name": "Kinesis (LocalStack)",
+      "kind": "streaming",
+      "status": "beta",
+      "free": true,
+      "docker_service": "localstack",
+      "docker_profile": "playground",
+      "image": "localstack/localstack:latest",
+      "prerequisites": [
+        "docker",
+        "profile=playground"
+      ]
+    },
+    {
+      "id": "wiremock-rest",
+      "name": "REST API (WireMock)",
+      "kind": "rest",
+      "status": "beta",
+      "free": true,
+      "docker_service": "wiremock",
+      "docker_profile": "playground",
+      "image": "wiremock/wiremock:3.9.2",
+      "prerequisites": [
+        "docker",
+        "profile=playground"
+      ]
+    },
+    {
+      "id": "toxiproxy",
+      "name": "Toxiproxy (chaos)",
+      "kind": "streaming",
+      "status": "beta",
+      "free": true,
+      "docker_service": "toxiproxy",
+      "docker_profile": "chaos",
+      "image": "ghcr.io/shopify/toxiproxy:latest",
+      "prerequisites": [
+        "docker",
+        "profile=chaos"
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "in-memory-generator",
+      "source_id": "in-memory",
+      "title": "In-memory generator → Iceberg (fixture)",
+      "description": "Retained as a test fixture for the sidecar-free/loopback code path (quota, /metrics, action error-truthfulness integration tests). Its actions issue ANSI Iceberg DDL/DML (CREATE TABLE / INSERT / ALTER / SELECT against warehouse.*) that /api/v1/sql does not execute — the parser is management-DDL only by design. Not promoted to any user-facing deployment.",
+      "difficulty": "beginner",
+      "tier": 1,
+      "status": "beta",
+      "tags": [
+        "synthetic",
+        "iceberg",
+        "test-fixture"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [],
+        "min_memory_mb": 256
+      },
+      "estimated_duration_s": 90,
+      "actions": [
+        {
+          "id": "create-table",
+          "label": "Create demo table",
+          "kind": "sql",
+          "target": "ops",
+          "sql": "CREATE TABLE IF NOT EXISTS warehouse.{namespace}.demo_orders (id BIGINT, customer VARCHAR, total_cents BIGINT, status VARCHAR, created_at TIMESTAMP);"
+        },
+        {
+          "id": "burst-100",
+          "label": "Insert 100 synthetic rows",
+          "kind": "sql",
+          "target": "ops",
+          "sql": "INSERT INTO warehouse.{namespace}.demo_orders SELECT seq AS id, CONCAT('customer-', seq) AS customer, CAST(seq * 137 AS BIGINT) AS total_cents, CASE WHEN seq % 4 = 0 THEN 'pending' WHEN seq % 4 = 1 THEN 'shipped' WHEN seq % 4 = 2 THEN 'delivered' ELSE 'returned' END AS status, CURRENT_TIMESTAMP AS created_at FROM UNNEST(SEQUENCE(1, 100)) AS t(seq);"
+        },
+        {
+          "id": "schema-add-field",
+          "label": "Add 'priority' column",
+          "kind": "sql",
+          "target": "ops",
+          "sql": "ALTER TABLE warehouse.{namespace}.demo_orders ADD COLUMN priority VARCHAR;"
+        },
+        {
+          "id": "query-recent",
+          "label": "Count rows landed",
+          "kind": "sql",
+          "target": "ops",
+          "sql": "SELECT COUNT(*) AS row_count FROM warehouse.{namespace}.demo_orders;"
+        }
+      ],
+      "break_scenarios": [
+        {
+          "id": "schema-drop-field",
+          "label": "Drop 'priority' column",
+          "kind": "sql",
+          "target": "ops",
+          "sql": "ALTER TABLE warehouse.{namespace}.demo_orders DROP COLUMN priority;",
+          "destructive": true
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "rows_landed",
+          "assertion": "gte",
+          "value": 100
+        }
+      ]
+    },
+    {
+      "id": "postgres-cdc-ecommerce",
+      "source_id": "postgres",
+      "title": "PostgreSQL CDC — e-commerce happy path",
+      "description": "Logical replication from a 9.6K-row e-commerce schema into Iceberg. Insert, update, and delete orders from the UI and watch them land.",
+      "difficulty": "beginner",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "cdc",
+        "happy-path",
+        "postgres"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed",
+          "cloud"
+        ],
+        "profiles": [],
+        "min_memory_mb": 1024
+      },
+      "init_sql": "postgres-cdc/init.sql",
+      "shuttle_sql": "playground/postgres-cdc/shuttle.sql",
+      "estimated_duration_s": 180,
+      "actions": [
+        {
+          "id": "insert-order",
+          "label": "Insert order",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/insert-order.sql"
+        },
+        {
+          "id": "update-order",
+          "label": "Update order status",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/update-order.sql"
+        },
+        {
+          "id": "delete-order",
+          "label": "Delete oldest order",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/delete-order.sql"
+        },
+        {
+          "id": "burst-100",
+          "label": "Burst: 100 inserts",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/burst-100.sql",
+          "repeat": 1
+        }
+      ],
+      "break_scenarios": [
+        {
+          "id": "drop-column",
+          "label": "Drop tracked column",
+          "kind": "sql",
+          "target": "source",
+          "sql": "ALTER TABLE orders DROP COLUMN status;",
+          "destructive": true
+        },
+        {
+          "id": "rename-table",
+          "label": "Rename tracked table",
+          "kind": "sql",
+          "target": "source",
+          "sql": "ALTER TABLE orders RENAME TO orders_v2;",
+          "destructive": true
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "rows_landed",
+          "assertion": "gte",
+          "value": 9600
+        },
+        {
+          "metric": "dlq_count",
+          "assertion": "eq",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "id": "postgres-schema-evolution",
+      "source_id": "postgres",
+      "title": "Schema evolution — ADD / DROP / RENAME",
+      "description": "Watch Iceberg absorb column additions, drops, renames, and type widenings without shuttle interruption.",
+      "difficulty": "intermediate",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "cdc",
+        "schema-evolution",
+        "postgres",
+        "cloud"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed",
+          "cloud"
+        ],
+        "profiles": []
+      },
+      "init_sql": "postgres-cdc/init.sql",
+      "shuttle_sql": "playground/postgres-cdc/shuttle.sql",
+      "estimated_duration_s": 240,
+      "actions": [
+        {
+          "id": "add-column",
+          "label": "ADD COLUMN shipping_fee NUMERIC",
+          "kind": "sql",
+          "target": "source",
+          "sql": "ALTER TABLE orders ADD COLUMN shipping_fee NUMERIC(10,2) DEFAULT 0;"
+        },
+        {
+          "id": "widen-type",
+          "label": "ALTER TYPE integer → bigint",
+          "kind": "sql",
+          "target": "source",
+          "sql": "ALTER TABLE orders ALTER COLUMN total_cents TYPE BIGINT;"
+        },
+        {
+          "id": "rename-column",
+          "label": "RENAME COLUMN",
+          "kind": "sql",
+          "target": "source",
+          "sql": "ALTER TABLE orders RENAME COLUMN notes TO customer_notes;"
+        },
+        {
+          "id": "drop-column",
+          "label": "DROP COLUMN (soft)",
+          "kind": "sql",
+          "target": "source",
+          "sql": "ALTER TABLE orders DROP COLUMN internal_tag;",
+          "destructive": true
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "schema_evolution_events",
+          "assertion": "gte",
+          "value": 4
+        }
+      ]
+    },
+    {
+      "id": "postgres-backfill-plus-live",
+      "source_id": "postgres",
+      "title": "Backfill + live — no gap",
+      "description": "Snapshot runs concurrently with live CDC. Verify every row lands exactly once, no gap at the handoff.",
+      "difficulty": "intermediate",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "cdc",
+        "backfill",
+        "postgres",
+        "correctness",
+        "cloud"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed",
+          "cloud"
+        ],
+        "profiles": []
+      },
+      "init_sql": "postgres-cdc/init.sql",
+      "shuttle_sql": "playground/postgres-cdc/shuttle-backfill.sql",
+      "estimated_duration_s": 300,
+      "actions": [
+        {
+          "id": "start-backfill",
+          "label": "Start snapshot",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/shuttles/{shuttle}/backfill"
+          }
+        },
+        {
+          "id": "live-tick",
+          "label": "Live insert during snapshot",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/live-tick.sql",
+          "repeat": 50
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "dedup_gap_offsets",
+          "assertion": "eq",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "id": "clickhouse-high-cardinality",
+      "source_id": "clickhouse",
+      "title": "ClickHouse — high-cardinality clustering",
+      "description": "Load 100k web analytics events, tune Iceberg clustering key live and watch query plans change.",
+      "difficulty": "intermediate",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "snapshot",
+        "clickhouse",
+        "clustering"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "clickhouse"
+        ]
+      },
+      "init_sql": "clickhouse-snapshot/init.sql",
+      "shuttle_sql": "playground/clickhouse-snapshot/shuttle.sql",
+      "estimated_duration_s": 300,
+      "actions": [
+        {
+          "id": "load-100k",
+          "label": "Load 100k events",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "clickhouse-snapshot/actions/load-100k.sql"
+        },
+        {
+          "id": "cluster-by-user",
+          "label": "Cluster by user_id",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "PATCH",
+            "url": "/api/v1/shuttles/{shuttle}/clustering",
+            "body": {
+              "columns": [
+                "user_id"
+              ]
+            }
+          }
+        },
+        {
+          "id": "cluster-by-session",
+          "label": "Cluster by session+time",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "PATCH",
+            "url": "/api/v1/shuttles/{shuttle}/clustering",
+            "body": {
+              "columns": [
+                "session_id",
+                "event_time"
+              ]
+            }
+          }
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "query_time_improvement_pct",
+          "assertion": "gte",
+          "value": 30
+        }
+      ]
+    },
+    {
+      "id": "clickhouse-time-travel",
+      "source_id": "clickhouse",
+      "title": "Iceberg time travel — query at timestamp / rollback",
+      "description": "Run SELECTs at historical timestamps and roll back to earlier snapshots to recover from a bad write.",
+      "difficulty": "advanced",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "iceberg",
+        "time-travel",
+        "clickhouse"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "clickhouse"
+        ]
+      },
+      "init_sql": "clickhouse-snapshot/init.sql",
+      "shuttle_sql": "playground/clickhouse-snapshot/shuttle.sql",
+      "estimated_duration_s": 240,
+      "actions": [
+        {
+          "id": "take-snapshot-1",
+          "label": "Snapshot 1 (baseline)",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/shuttles/{shuttle}/commit"
+          }
+        },
+        {
+          "id": "bad-write",
+          "label": "Simulate bad write",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "clickhouse-snapshot/actions/bad-write.sql"
+        },
+        {
+          "id": "query-at-t1",
+          "label": "Query at T1",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/sql",
+            "body": {
+              "sql": "SELECT count(*) FROM warehouse.analytics FOR SYSTEM_TIME AS OF '{t1}'"
+            }
+          }
+        },
+        {
+          "id": "rollback",
+          "label": "Rollback to T1",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/shuttles/{shuttle}/rollback",
+            "body": {
+              "snapshot_id": "{snapshot_1}"
+            }
+          }
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "kafka-json-poison",
+      "source_id": "kafka",
+      "title": "Kafka — poison message → DLQ",
+      "description": "Ingest a topic, inject an unparseable JSON message, watch it land in the DLQ, fix it, and replay.",
+      "difficulty": "beginner",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "kafka",
+        "dlq",
+        "poison-message"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "playground"
+        ]
+      },
+      "shuttle_sql": "realtime-demo/scenarios/kafka-json/shuttle.sql",
+      "estimated_duration_s": 180,
+      "actions": [
+        {
+          "id": "produce-valid",
+          "label": "Produce 100 valid events",
+          "kind": "produce-kafka",
+          "target": "kafka",
+          "payload_file": "realtime-demo/scenarios/kafka-json/valid-event.json",
+          "repeat": 100
+        },
+        {
+          "id": "produce-poison",
+          "label": "Inject poison message",
+          "kind": "produce-kafka",
+          "target": "kafka",
+          "payload_file": "realtime-demo/scenarios/kafka-json/poison-event.raw",
+          "expected_dlq": true
+        },
+        {
+          "id": "replay-dlq",
+          "label": "Replay DLQ entries",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/deadletters/{shuttle}/replay"
+          }
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "dlq_count",
+          "assertion": "gte",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "kafka-throughput",
+      "source_id": "kafka",
+      "title": "Kafka — throughput fast-forward (10k burst)",
+      "description": "Generate 10k events in 5 seconds. Arrow Flight hot buffer shows sub-second latency while Iceberg commits batch.",
+      "difficulty": "intermediate",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "kafka",
+        "throughput",
+        "arrow-flight",
+        "realtime"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "playground"
+        ]
+      },
+      "shuttle_sql": "realtime-demo/scenarios/kafka-throughput/shuttle.sql",
+      "estimated_duration_s": 120,
+      "actions": [
+        {
+          "id": "burst-10k",
+          "label": "Burst 10k events",
+          "kind": "produce-kafka",
+          "target": "kafka",
+          "payload_file": "realtime-demo/scenarios/kafka-throughput/event.json",
+          "repeat": 10000
+        },
+        {
+          "id": "read-flight",
+          "label": "Read hot buffer",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "GET",
+            "url": "/api/v1/shuttles/{shuttle}/flight/peek?rows=50"
+          }
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "hot_buffer_latency_ms_p99",
+          "assertion": "lte",
+          "value": 5
+        }
+      ]
+    },
+    {
+      "id": "mysql-binlog-restart",
+      "source_id": "mysql",
+      "title": "MySQL — binlog recovery after outage",
+      "description": "Stop MySQL for 30 seconds, generate writes to buffer, restart — shuttle resumes from last checkpoint.",
+      "difficulty": "intermediate",
+      "tier": 2,
+      "status": "beta",
+      "tags": [
+        "cdc",
+        "mysql",
+        "recovery"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "full"
+        ]
+      },
+      "init_sql": "mysql-cdc/init.sql",
+      "shuttle_sql": "playground/mysql-cdc/shuttle.sql",
+      "estimated_duration_s": 240,
+      "actions": [
+        {
+          "id": "stop-mysql",
+          "label": "Stop MySQL (30s)",
+          "kind": "shell",
+          "target": "ops",
+          "shell_cmd": "docker compose -f examples/docker-compose.yml stop mysql && sleep 30 && docker compose -f examples/docker-compose.yml start mysql"
+        },
+        {
+          "id": "catchup-load",
+          "label": "Verify catch-up",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "mysql-cdc/actions/catchup.sql"
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "shuttle_resumed",
+          "assertion": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "mongodb-nested-evolution",
+      "source_id": "mongodb",
+      "title": "MongoDB — nested field evolution",
+      "description": "Add a nested field to social-media documents, watch Iceberg flatten the new structure automatically.",
+      "difficulty": "intermediate",
+      "tier": 2,
+      "status": "beta",
+      "tags": [
+        "cdc",
+        "mongodb",
+        "schema-evolution",
+        "nested"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "full"
+        ]
+      },
+      "init_sql": "mongodb-cdc/init.js",
+      "shuttle_sql": "playground/mongodb-cdc/shuttle.sql",
+      "estimated_duration_s": 240,
+      "actions": [
+        {
+          "id": "insert-nested",
+          "label": "Insert doc with nested author",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "mongosh --quiet --host localhost examples/mongodb-cdc/actions/insert-nested.js"
+        },
+        {
+          "id": "evolve-nested",
+          "label": "Add sub-field author.verified",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "mongosh --quiet --host localhost examples/mongodb-cdc/actions/evolve-nested.js"
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "file-s3-mixed-formats",
+      "source_id": "s3-file",
+      "title": "S3 files — CSV / JSON / Parquet mix",
+      "description": "Upload CSV, JSONL, and Parquet into the same prefix. One shuttle handles all three with format auto-detection.",
+      "difficulty": "beginner",
+      "tier": 2,
+      "status": "beta",
+      "tags": [
+        "file",
+        "s3",
+        "formats"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": []
+      },
+      "shuttle_sql": "playground/file-ingestion/shuttle-csv.sql",
+      "estimated_duration_s": 180,
+      "actions": [
+        {
+          "id": "upload-csv",
+          "label": "Upload customers.csv",
+          "kind": "upload-file",
+          "target": "s3",
+          "payload_file": "file-ingestion/data/customers.csv"
+        },
+        {
+          "id": "upload-json",
+          "label": "Upload transactions.json",
+          "kind": "upload-file",
+          "target": "s3",
+          "payload_file": "file-ingestion/data/transactions.json"
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "rows_landed",
+          "assertion": "gte",
+          "value": 3500
+        }
+      ]
+    },
+    {
+      "id": "file-bad-encoding",
+      "source_id": "s3-file",
+      "title": "S3 files — bad encoding → DLQ",
+      "description": "A file with broken UTF-8 is rejected into the DLQ and can be re-encoded and replayed.",
+      "difficulty": "intermediate",
+      "tier": 2,
+      "status": "beta",
+      "tags": [
+        "file",
+        "dlq",
+        "encoding"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": []
+      },
+      "shuttle_sql": "playground/file-ingestion/shuttle-csv.sql",
+      "estimated_duration_s": 180,
+      "actions": [
+        {
+          "id": "upload-bad",
+          "label": "Upload bad-encoding.csv",
+          "kind": "upload-file",
+          "target": "s3",
+          "payload_file": "file-ingestion/actions/bad-encoding.csv",
+          "expected_dlq": true
+        },
+        {
+          "id": "replay-dlq",
+          "label": "Re-encode + replay",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/deadletters/{shuttle}/replay"
+          }
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "dlq_count",
+          "assertion": "gte",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "rest-api-polling",
+      "source_id": "wiremock-rest",
+      "title": "REST API polling (WireMock)",
+      "description": "Poll a WireMock endpoint every 5s. Fake API returns 100 deterministic users per page.",
+      "difficulty": "beginner",
+      "tier": 3,
+      "status": "beta",
+      "tags": [
+        "rest",
+        "polling"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "playground"
+        ]
+      },
+      "init_sql": "playground/rest-api/init.sql",
+      "shuttle_sql": "playground/rest-api/shuttle.sql",
+      "estimated_duration_s": 180,
+      "actions": [
+        {
+          "id": "trigger-poll",
+          "label": "Trigger poll now",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/shuttles/{shuttle}/poll"
+          }
+        },
+        {
+          "id": "reset-mappings",
+          "label": "Reset WireMock mappings",
+          "kind": "http",
+          "target": "rest",
+          "http_request": {
+            "method": "POST",
+            "url": "http://wiremock:8080/__admin/mappings/reset"
+          }
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "dynamodb-streams",
+      "source_id": "dynamodb-local",
+      "title": "DynamoDB Streams — TTL + tombstones",
+      "description": "Local DynamoDB with Streams enabled. TTL-expired rows emit delete events and tombstones land in Iceberg.",
+      "difficulty": "advanced",
+      "tier": 3,
+      "status": "beta",
+      "tags": [
+        "dynamodb",
+        "streams",
+        "ttl"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "playground"
+        ]
+      },
+      "init_sql": "playground/dynamodb/init.sh",
+      "shuttle_sql": "playground/dynamodb/shuttle.sql",
+      "estimated_duration_s": 240,
+      "actions": [
+        {
+          "id": "put-items",
+          "label": "Put 100 items with TTL=60s",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "bash examples/playground/dynamodb/actions/put-items.sh 100 60"
+        },
+        {
+          "id": "force-expire",
+          "label": "Force TTL sweep",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "bash examples/playground/dynamodb/actions/force-expire.sh"
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "kinesis-shards",
+      "source_id": "localstack-kinesis",
+      "title": "Kinesis — re-sharding under load",
+      "description": "LocalStack Kinesis stream splits and merges shards while ingest is running. Shuttle follows shard changes.",
+      "difficulty": "advanced",
+      "tier": 3,
+      "status": "beta",
+      "tags": [
+        "kinesis",
+        "resharding"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "playground"
+        ]
+      },
+      "init_sql": "playground/kinesis/init.sh",
+      "shuttle_sql": "playground/kinesis/shuttle.sql",
+      "estimated_duration_s": 300,
+      "actions": [
+        {
+          "id": "produce",
+          "label": "Produce 5k records",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "bash examples/playground/kinesis/actions/produce.sh 5000"
+        },
+        {
+          "id": "split-shard",
+          "label": "Split shard",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "bash examples/playground/kinesis/actions/split-shard.sh"
+        },
+        {
+          "id": "merge-shards",
+          "label": "Merge adjacent shards",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "bash examples/playground/kinesis/actions/merge-shards.sh"
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "cassandra-wide-row",
+      "source_id": "cassandra",
+      "title": "Cassandra — wide rows + batching",
+      "description": "Wide rows with 1000+ columns. Verify batching and memory use stay bounded.",
+      "difficulty": "advanced",
+      "tier": 3,
+      "status": "beta",
+      "tags": [
+        "cassandra",
+        "wide-row",
+        "memory"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "playground"
+        ],
+        "min_memory_mb": 2048
+      },
+      "init_sql": "playground/cassandra/init.cql",
+      "shuttle_sql": "playground/cassandra/shuttle.sql",
+      "estimated_duration_s": 240,
+      "actions": [
+        {
+          "id": "load-wide",
+          "label": "Load 500 wide rows",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "bash examples/playground/cassandra/actions/load-wide.sh 500"
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "slow-consumer",
+      "source_id": "kafka",
+      "title": "Slow consumer — backpressure",
+      "description": "Artificially throttle Iceberg commits to 1 per 10s. Watch the hot Arrow buffer grow and memory guards engage.",
+      "difficulty": "advanced",
+      "tier": 4,
+      "status": "beta",
+      "tags": [
+        "chaos",
+        "backpressure",
+        "kafka"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "playground",
+          "chaos"
+        ]
+      },
+      "shuttle_sql": "realtime-demo/scenarios/kafka-throughput/shuttle.sql",
+      "estimated_duration_s": 240,
+      "actions": [
+        {
+          "id": "throttle",
+          "label": "Throttle commits to 1/10s",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "PATCH",
+            "url": "/api/v1/shuttles/{shuttle}",
+            "body": {
+              "commit_interval_ms": 10000
+            }
+          }
+        },
+        {
+          "id": "unthrottle",
+          "label": "Restore 5s commits",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "PATCH",
+            "url": "/api/v1/shuttles/{shuttle}",
+            "body": {
+              "commit_interval_ms": 5000
+            }
+          }
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "large-payload",
+      "source_id": "mysql",
+      "title": "Large payload — 50MB BLOB",
+      "description": "Replicate a table with BLOB columns up to 50MB each. Verify streaming and memory stability.",
+      "difficulty": "advanced",
+      "tier": 4,
+      "status": "beta",
+      "tags": [
+        "chaos",
+        "large-payload",
+        "mysql"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed"
+        ],
+        "profiles": [
+          "full",
+          "chaos"
+        ],
+        "min_memory_mb": 4096
+      },
+      "init_sql": "playground/large-payload/init.sql",
+      "shuttle_sql": "playground/large-payload/shuttle.sql",
+      "estimated_duration_s": 300,
+      "actions": [
+        {
+          "id": "insert-50mb",
+          "label": "Insert 50MB blob",
+          "kind": "shell",
+          "target": "source",
+          "shell_cmd": "bash examples/playground/large-payload/actions/insert-50mb.sh"
+        }
+      ],
+      "expected_outcomes": []
+    }
+  ]
+}
