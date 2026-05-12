@@ -1005,8 +1005,8 @@ async fn produce_kafka(
     validate_example_relative_path(payload_file)?;
     let repeat = repeat.min(100_000);
     let cmd = format!(
-        "for i in $(seq 1 {repeat}); do cat examples/{payload_file}; echo; done | \
-         docker compose -f examples/docker-compose.yml exec -T redpanda rpk topic produce {topic}",
+        "for i in $(seq 1 {repeat}); do cat /opt/datashuttle/examples/{payload_file}; echo; done | \
+         docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T redpanda rpk topic produce {topic}",
         repeat = repeat,
         payload_file = shell_quote(payload_file),
         topic = shell_quote(&kafka_topic_for(session))
@@ -1018,7 +1018,7 @@ async fn upload_file(payload_file: &str, session: &Session) -> Result<(String, S
     validate_example_relative_path(payload_file)?;
     let bucket = s3_bucket_for(session);
     let cmd = format!(
-        "docker compose -f examples/docker-compose.yml exec -T minio-init \
+        "docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T minio-init \
          mc cp /data/{payload_file} local/{bucket}/",
         payload_file = shell_quote(payload_file),
         bucket = shell_quote(&bucket)
@@ -1220,7 +1220,7 @@ fn build_docker_shell_registry() -> DockerShellRegistry {
             build_shell: |b64| {
                 format!(
                     "echo {b64} | base64 -d | \
-                     docker compose -f examples/docker-compose.yml exec -T postgres \
+                     docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T postgres \
                      psql -U postgres -d ecommerce -v ON_ERROR_STOP=1"
                 )
             },
@@ -1233,7 +1233,7 @@ fn build_docker_shell_registry() -> DockerShellRegistry {
             build_shell: |b64| {
                 format!(
                     "echo {b64} | base64 -d | \
-                     docker compose -f examples/docker-compose.yml exec -T mysql \
+                     docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T mysql \
                      mysql -uroot -prootpass --default-character-set=utf8mb4 iot"
                 )
             },
@@ -1246,7 +1246,7 @@ fn build_docker_shell_registry() -> DockerShellRegistry {
             build_shell: |b64| {
                 format!(
                     "echo {b64} | base64 -d | \
-                     docker compose -f examples/docker-compose.yml exec -T clickhouse \
+                     docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T clickhouse \
                      clickhouse-client --multiquery"
                 )
             },
@@ -1259,7 +1259,7 @@ fn build_docker_shell_registry() -> DockerShellRegistry {
             build_shell: |b64| {
                 format!(
                     "echo {b64} | base64 -d | \
-                     docker compose -f examples/docker-compose.yml exec -T mongodb mongosh --quiet"
+                     docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T mongodb mongosh --quiet"
                 )
             },
             container_cmd: "mongosh",
@@ -1271,7 +1271,7 @@ fn build_docker_shell_registry() -> DockerShellRegistry {
             build_shell: |b64| {
                 format!(
                     "echo {b64} | base64 -d | \
-                     docker compose -f examples/docker-compose.yml exec -T cassandra cqlsh"
+                     docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T cassandra cqlsh"
                 )
             },
             container_cmd: "cqlsh",
