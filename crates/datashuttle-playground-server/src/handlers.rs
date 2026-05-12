@@ -1004,8 +1004,48 @@ async fn produce_kafka(
 ) -> Result<(String, String), String> {
     use base64::Engine;
     validate_example_relative_path(payload_file)?;
-    let repeat = repeat.min(100_000) as usize;
+    let repeat = (repeat.min(100_000)) as usize;
     let topic = kafka_topic_for(session);
+
+    let host =
+        std::env::var("DS_KAFKA_PLAYGROUND_HOST").unwrap_or_else(|_| "redpanda-playground".into());
+    let port = std::env::var("DS_KAFKA_PLAYGROUND_PORT").unwrap_or_else(|_| "8082".into());
+    // Kafka native port is conventionally 9092 — Pandaproxy doesn't
+    // expose it via env. Keep it pinned; if a deployment ever moves it,
+    // override via DS_KAFKA_PLAYGROUND_BROKER.
+    let broker = std::env::var("DS_KAFKA_PLAYGROUND_BROKER")
+        .unwrap_or_else(|_| format!("{host}:9092"));
+
+    // Ensure the topic exists. Pandaproxy's REST produce does NOT
+    // auto-create — first POST returns UNKNOWN_TOPIC_OR_PARTITION
+    // even though broker `auto_create_topics_enabled=true`. Use rpk
+    // (baked in the image) to create idempotently before producing.
+    let create = tokio::process::Command::new("rpk")
+        .args([
+            "topic",
+            "create",
+            &topic,
+            "--brokers",
+            &broker,
+            "--partitions",
+            "1",
+            "--replicas",
+            "1",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("spawn rpk: {e}"))?;
+    // rpk exits non-zero only on hard errors; "already exists" returns
+    // 0 with a stderr note. Treat any non-zero with stderr containing
+    // ALREADY_EXISTS as success.
+    if !create.status.success() {
+        let stderr = String::from_utf8_lossy(&create.stderr);
+        if !stderr.contains("TOPIC_ALREADY_EXISTS") && !stderr.contains("already exists") {
+            return Err(format!(
+                "rpk topic create {topic} (broker={broker}): {stderr}"
+            ));
+        }
+    }
 
     // Read the payload from the baked examples tree. `.json` → produce
     // through Pandaproxy's JSON endpoint with raw JSON value; anything
@@ -1020,67 +1060,63 @@ async fn produce_kafka(
         .map(|e| e.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
 
-    let (content_type, body) = if is_json {
-        // Validate once so we can build a typed records[] array. If the
-        // file is invalid JSON we fall through to binary so the poison
-        // case still works even with a `.json` extension.
+    // Build one record template. Either typed JSON `value` or base64-
+    // encoded `value` (binary endpoint). Pandaproxy chokes at ~10k
+    // records per request, so we chunk the batch.
+    let (content_type, record_template): (&str, Value) = if is_json {
         match serde_json::from_slice::<Value>(&bytes) {
-            Ok(v) => {
-                let records: Vec<Value> = (0..repeat)
-                    .map(|_| serde_json::json!({"value": v.clone()}))
-                    .collect();
-                (
-                    "application/vnd.kafka.json.v2+json",
-                    serde_json::json!({"records": records}),
-                )
-            }
+            Ok(v) => (
+                "application/vnd.kafka.json.v2+json",
+                serde_json::json!({"value": v}),
+            ),
             Err(_) => {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let records: Vec<Value> = (0..repeat)
-                    .map(|_| serde_json::json!({"value": encoded.clone()}))
-                    .collect();
                 (
                     "application/vnd.kafka.binary.v2+json",
-                    serde_json::json!({"records": records}),
+                    serde_json::json!({"value": encoded}),
                 )
             }
         }
     } else {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let records: Vec<Value> = (0..repeat)
-            .map(|_| serde_json::json!({"value": encoded.clone()}))
-            .collect();
         (
             "application/vnd.kafka.binary.v2+json",
-            serde_json::json!({"records": records}),
+            serde_json::json!({"value": encoded}),
         )
     };
 
-    let host =
-        std::env::var("DS_KAFKA_PLAYGROUND_HOST").unwrap_or_else(|_| "redpanda-playground".into());
-    let port = std::env::var("DS_KAFKA_PLAYGROUND_PORT").unwrap_or_else(|_| "8082".into());
     let url = format!("http://{host}:{port}/topics/{topic}");
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .header("Content-Type", content_type)
-        .body(serde_json::to_vec(&body).map_err(|e| format!("encode body: {e}"))?)
-        .send()
-        .await
-        .map_err(|e| format!("pandaproxy POST {url}: {e}"))?;
-    let status = resp.status();
-    let resp_body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!(
-            "pandaproxy returned {status} for topic {topic}: {resp_body}"
-        ));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("reqwest build: {e}"))?;
+    let chunk = 500;
+    let mut produced = 0usize;
+    let mut last_body = String::new();
+    while produced < repeat {
+        let n = chunk.min(repeat - produced);
+        let records: Vec<Value> = (0..n).map(|_| record_template.clone()).collect();
+        let body = serde_json::json!({"records": records});
+        let resp = client
+            .post(&url)
+            .header("Content-Type", content_type)
+            .body(serde_json::to_vec(&body).map_err(|e| format!("encode body: {e}"))?)
+            .send()
+            .await
+            .map_err(|e| format!("pandaproxy POST {url}: {e}"))?;
+        let status = resp.status();
+        last_body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "pandaproxy returned {status} for topic {topic} (after {produced} produced): {last_body}"
+            ));
+        }
+        produced += n;
     }
     Ok((
-        format!(
-            "produced {repeat} record(s) to {topic} via {host}:{port} ({content_type})"
-        ),
-        resp_body,
+        format!("produced {produced} record(s) to {topic} via {host}:{port} ({content_type})"),
+        last_body,
     ))
 }
 
