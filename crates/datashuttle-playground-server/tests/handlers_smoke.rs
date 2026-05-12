@@ -85,10 +85,10 @@ fn test_state() -> Arc<ServerState> {
 async fn create_then_delete_session_wires_correctly() {
     let app = router(test_state());
 
-    // POST /api/v1/playground/sessions
+    // POST /api/v1/sessions
     let req = Request::builder()
         .method("POST")
-        .uri("/api/v1/playground/sessions")
+        .uri("/api/v1/sessions")
         .header("Content-Type", "application/json")
         .header("X-Datashuttle-User-Id", "test-user-1")
         .header("X-Datashuttle-Auth-Method", "oidc")
@@ -114,10 +114,10 @@ async fn create_then_delete_session_wires_correctly() {
         .expect("session_id should be a string in response")
         .to_string();
 
-    // DELETE /api/v1/playground/sessions/:id
+    // DELETE /api/v1/sessions/:id
     let req = Request::builder()
         .method("DELETE")
-        .uri(format!("/api/v1/playground/sessions/{session_id}"))
+        .uri(format!("/api/v1/sessions/{session_id}"))
         .header("X-Datashuttle-User-Id", "test-user-1")
         .header("X-Datashuttle-Auth-Method", "oidc")
         .body(Body::empty())
@@ -136,7 +136,7 @@ async fn list_sessions_requires_identity() {
     let app = router(test_state());
     let req = Request::builder()
         .method("GET")
-        .uri("/api/v1/playground/sessions")
+        .uri("/api/v1/sessions")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.expect("request");
@@ -160,7 +160,7 @@ async fn manifest_is_reachable_without_identity() {
     let app = router(test_state());
     let req = Request::builder()
         .method("GET")
-        .uri("/api/v1/playground/manifest")
+        .uri("/api/v1/manifest")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.expect("request");

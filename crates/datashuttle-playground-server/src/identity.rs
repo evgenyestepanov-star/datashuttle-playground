@@ -13,7 +13,7 @@
 //! standalone playground-server is internal-only by design.
 //!
 //! Public probe endpoints (`/health`, `/metrics`,
-//! `/api/v1/playground/health`, `/api/v1/playground/manifest`) skip
+//! `/api/v1/playground/health`, `/api/v1/manifest`) skip
 //! the check so dashboards and load balancers can reach them.
 
 use axum::extract::Request;
@@ -62,9 +62,11 @@ pub struct Identity {
 /// `auth_middleware` exemptions in `router.rs` — keep both lists in
 /// sync.
 fn is_exempt(path: &str) -> bool {
+    // Paths reflect the post-strip layout the OSS api's reverse-proxy
+    // produces: `/api/v1/playground/<x>` arrives here as `/api/v1/<x>`.
     matches!(
         path,
-        "/health" | "/metrics" | "/api/v1/playground/health" | "/api/v1/playground/manifest"
+        "/health" | "/metrics" | "/api/v1/health" | "/api/v1/manifest"
     )
 }
 
@@ -155,8 +157,8 @@ mod tests {
     fn test_app() -> Router {
         Router::new()
             .route("/health", get(probe))
-            .route("/api/v1/playground/manifest", get(probe))
-            .route("/api/v1/playground/sessions", get(probe))
+            .route("/api/v1/manifest", get(probe))
+            .route("/api/v1/sessions", get(probe))
             .layer(from_fn(identity_middleware))
     }
 
@@ -165,7 +167,7 @@ mod tests {
         let resp = test_app()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/api/v1/playground/sessions")
+                    .uri("/api/v1/sessions")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -179,7 +181,7 @@ mod tests {
         let resp = test_app()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/api/v1/playground/sessions")
+                    .uri("/api/v1/sessions")
                     .header("X-Datashuttle-User-Id", "user-1")
                     .header("X-Datashuttle-Tenant-Id", "tenant-1")
                     .header("X-Datashuttle-Auth-Method", "oidc")
@@ -198,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn exempt_paths_skip_identity_check() {
-        for path in ["/health", "/api/v1/playground/manifest"] {
+        for path in ["/health", "/api/v1/manifest"] {
             let resp = test_app()
                 .oneshot(
                     HttpRequest::builder()

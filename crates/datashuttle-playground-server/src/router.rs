@@ -64,14 +64,28 @@ pub struct ServerState {
 }
 
 pub fn router(state: Arc<ServerState>) -> Router {
-    // Session-lifecycle routes ported from OSS handlers — these need
-    // `Identity` from the X-Datashuttle-* headers, so we mount them
-    // under the identity middleware.
+    // Routes are mounted directly under `/api/v1`, NOT nested at
+    // `/playground` — the OSS api's reverse-proxy strips the
+    // `/api/v1/playground` prefix on inbound and forwards as
+    // `/api/v1/<rest>` to this binary. So when a browser hits
+    //
+    //     POST https://api/api/v1/playground/sessions
+    //
+    // the standalone server sees
+    //
+    //     POST /api/v1/sessions
+    //
+    // and the route below has to match that flattened form. The
+    // session-lifecycle handlers ported from OSS api-core kept their
+    // original `/manifest`, `/sessions/...` etc. route paths from
+    // `handlers::routes()`, so merging them directly under `/api/v1`
+    // produces the right mapping. See
+    // `datashuttle-api-core::handlers::playground_proxy::strip_playground_prefix`.
     let session_routes = handlers::routes();
 
     let api_v1 = Router::new()
-        .route("/playground/health", get(health))
-        .nest("/playground", session_routes);
+        .route("/health", get(health))
+        .merge(session_routes);
 
     let app = Router::new()
         .route("/health", get(health))
@@ -130,10 +144,12 @@ async fn auth_middleware(
     // credentials. Manifest is also unauth so the public UI can
     // render the scenario list pre-login (`get_manifest` only
     // exposes scenario metadata, no tenant data).
+    // Paths after the api proxy's `/api/v1/playground` strip — see
+    // `datashuttle-api-core::handlers::playground_proxy::strip_playground_prefix`.
     if path == "/health"
         || path == "/metrics"
-        || path == "/api/v1/playground/health"
-        || path == "/api/v1/playground/manifest"
+        || path == "/api/v1/health"
+        || path == "/api/v1/manifest"
     {
         return next.run(req).await;
     }

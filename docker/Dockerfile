@@ -1,4 +1,9 @@
-FROM rust:1.85-bookworm AS builder
+# Phase 5.C bumped Rust from 1.85 → 1.94: post-port transitive deps
+# (home@0.5.12, icu_*@2.2, time@0.3.47, idna_adapter@1.2) require
+# rustc >= 1.86; the OSS Dockerfile is already on 1.94 and pinning
+# to the same toolchain keeps a `cargo update --workspace` resolution
+# consistent across the OSS + playground workspaces.
+FROM rust:1.94-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
