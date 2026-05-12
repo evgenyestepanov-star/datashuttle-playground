@@ -1,0 +1,89 @@
+# Initialize Polaris catalog: create warehouse catalog + roles + grants.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-init
+  namespace: datashuttle-demo
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-polaris
+          image: curlimages/curl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Polaris..."
+              until curl -so /dev/null --connect-timeout 2 http://polaris:8181/; do
+                sleep 3
+              done
+              echo "Polaris is up"
+      containers:
+        - name: init
+          image: curlimages/curl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "=== Polaris Init ==="
+
+              # 1. OAuth2 token
+              echo "Fetching token..."
+              TOKEN=$(curl -sf -X POST http://polaris:8181/api/catalog/v1/oauth/tokens \
+                -d "grant_type=client_credentials&client_id=root&client_secret=s3cr3t&scope=PRINCIPAL_ROLE:ALL" \
+                | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+
+              if [ -z "$TOKEN" ]; then
+                echo "ERROR: Failed to get token"
+                exit 1
+              fi
+
+              AUTH="Authorization: Bearer $TOKEN"
+              CT="Content-Type: application/json"
+
+              # 2. Create warehouse catalog
+              echo "Creating catalog..."
+              curl -sf -X POST http://polaris:8181/api/management/v1/catalogs \
+                -H "$AUTH" -H "$CT" \
+                -d '{
+                  "catalog": {
+                    "name": "warehouse",
+                    "type": "INTERNAL",
+                    "properties": {
+                      "default-base-location": "s3://warehouse/"
+                    },
+                    "storageConfigInfo": {
+                      "storageType": "S3",
+                      "allowedLocations": ["s3://warehouse/"],
+                      "stsUnavailable": true,
+                      "endpoint": "http://minio:9000",
+                      "endpointInternal": "http://minio:9000",
+                      "pathStyleAccess": true,
+                      "region": "us-east-1"
+                    }
+                  }
+                }' && echo " OK" || echo " (exists)"
+
+              # 3. Admin role
+              echo "Creating admin role..."
+              curl -sf -X POST http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles \
+                -H "$AUTH" -H "$CT" \
+                -d '{"catalogRole":{"name":"admin"}}' && echo " OK" || echo " (exists)"
+
+              # 4. Grant
+              echo "Granting..."
+              curl -sf -X PUT http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles/admin/grants \
+                -H "$AUTH" -H "$CT" \
+                -d '{"grant":{"type":"catalog","privilege":"CATALOG_MANAGE_CONTENT"}}' && echo " OK" || echo " (exists)"
+
+              # 5. Assign
+              echo "Assigning role..."
+              curl -sf -X PUT http://polaris:8181/api/management/v1/principal-roles/service_admin/catalog-roles/warehouse \
+                -H "$AUTH" -H "$CT" \
+                -d '{"catalogRole":{"name":"admin"}}' && echo " OK" || echo " (exists)"
+
+              echo "=== Polaris Init Complete ==="

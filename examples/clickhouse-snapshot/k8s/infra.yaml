@@ -1,0 +1,241 @@
+# Infrastructure for DataShuttle ClickHouse K8s demo:
+#   - MinIO (S3 storage)
+#   - Apache Polaris (Iceberg REST catalog)
+#   - ClickHouse (source database)
+
+# ════════════════════════════════════════════════════════════
+# MinIO
+# ════════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: datashuttle-demo
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: datashuttle-demo
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          command: ["minio", "server", "/data", "--console-address", ":9001"]
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          env:
+            - name: MINIO_ROOT_USER
+              value: minioadmin
+            - name: MINIO_ROOT_PASSWORD
+              value: minioadmin
+          readinessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: datashuttle-demo
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+      nodePort: 30901
+  type: NodePort
+---
+# MinIO bucket init job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+  namespace: datashuttle-demo
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-minio
+          image: curlimages/curl:latest
+          command: ["sh", "-c", "until curl -sf http://minio:9000/minio/health/live; do sleep 2; done"]
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mc alias set local http://minio:9000 minioadmin minioadmin
+              mc mb --ignore-existing local/warehouse
+              echo "Bucket 'warehouse' created"
+
+# ════════════════════════════════════════════════════════════
+# Apache Polaris (Iceberg REST catalog)
+# ════════════════════════════════════════════════════════════
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polaris
+  namespace: datashuttle-demo
+  labels:
+    app: polaris
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: polaris
+  template:
+    metadata:
+      labels:
+        app: polaris
+    spec:
+      containers:
+        - name: polaris
+          image: apache/polaris:latest
+          ports:
+            - containerPort: 8181
+              name: http
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: minioadmin
+            - name: AWS_SECRET_ACCESS_KEY
+              value: minioadmin
+            - name: AWS_REGION
+              value: us-east-1
+            - name: POLARIS_BOOTSTRAP_CREDENTIALS
+              value: "POLARIS,root,s3cr3t"
+          readinessProbe:
+            tcpSocket:
+              port: 8181
+            initialDelaySeconds: 15
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: polaris
+  namespace: datashuttle-demo
+spec:
+  selector:
+    app: polaris
+  ports:
+    - name: http
+      port: 8181
+      targetPort: 8181
+
+# ════════════════════════════════════════════════════════════
+# ClickHouse (source database)
+# ════════════════════════════════════════════════════════════
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clickhouse-data
+  namespace: datashuttle-demo
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: datashuttle-demo
+  labels:
+    app: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.8
+          ports:
+            - containerPort: 8123
+              name: http
+            - containerPort: 9000
+              name: native
+          env:
+            - name: CLICKHOUSE_DB
+              value: analytics
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: clickhouse-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: datashuttle-demo
+spec:
+  selector:
+    app: clickhouse
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+      nodePort: 30123
+    - name: native
+      port: 9000
+      targetPort: 9000
+  type: NodePort

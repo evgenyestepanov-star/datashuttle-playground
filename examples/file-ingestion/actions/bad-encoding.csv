@@ -1,0 +1,4 @@
+id,name,country
+1,valid,US
+2,"broken\xFF\xFEencoding",US
+3,also-valid,DE

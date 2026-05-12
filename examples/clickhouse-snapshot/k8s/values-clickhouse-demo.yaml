@@ -1,0 +1,67 @@
+# Helm values override for ClickHouse K8s demo.
+# Deploys 3-node DataShuttle cluster into datashuttle-demo namespace.
+
+replicaCount: 3
+
+image:
+  repository: datashuttle
+  tag: latest
+  pullPolicy: Never
+
+config:
+  cluster:
+    enabled: true
+    gossipPort: 7946
+    leaseTtl: 60s
+  catalog:
+    type: rest
+    uri: http://polaris:8181/api/catalog
+    name: warehouse
+  storage:
+    endpoint: http://minio:9000
+    warehouse: s3://warehouse/
+    region: us-east-1
+  shuttleDefaults:
+    commitInterval: "30 seconds"
+    icebergFormatVersion: 3
+    deleteMode: deletion_vectors
+
+secrets:
+  create: true
+  s3AccessKey: minioadmin
+  s3SecretKey: minioadmin
+  catalogClientId: root
+  catalogClientSecret: s3cr3t
+
+service:
+  type: NodePort
+  apiPort: 8080
+  flightPort: 8815
+  metricsPort: 9090
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 1Gi
+  limits:
+    cpu: 2
+    memory: 4Gi
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+terminationGracePeriodSeconds: 60
+
+serviceMonitor:
+  enabled: false
+
+persistence:
+  enabled: true
+  size: 1Gi
+
+ingress:
+  enabled: false

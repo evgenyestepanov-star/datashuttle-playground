@@ -1,0 +1,9 @@
+server:
+  api_addr: "0.0.0.0:8080"
+  flight_addr: "0.0.0.0:8815"
+  metrics_addr: "0.0.0.0:9090"
+  data_dir: "/tmp/ds-data"
+
+shuttle_defaults:
+  commit_interval: "30 seconds"
+  iceberg_format_version: 3

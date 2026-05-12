@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPathPattern": "/api/users"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "transformers": ["response-template"],
+    "jsonBody": {
+      "data": [
+        {"id": 1, "name": "Alice",   "country": "US", "ts": "{{now}}"},
+        {"id": 2, "name": "Bob",     "country": "DE", "ts": "{{now}}"},
+        {"id": 3, "name": "Carol",   "country": "FR", "ts": "{{now}}"},
+        {"id": 4, "name": "Dave",    "country": "UK", "ts": "{{now}}"},
+        {"id": 5, "name": "Erin",    "country": "CA", "ts": "{{now}}"}
+      ],
+      "page":  "{{request.query.page}}",
+      "total": 5000
+    }
+  }
+}

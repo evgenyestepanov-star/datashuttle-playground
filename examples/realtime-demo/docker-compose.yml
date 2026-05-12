@@ -1,0 +1,167 @@
+# DataShuttle Realtime Demo
+#
+# Kafka → DataShuttle → Arrow Flight (hot) + Iceberg (cold) → DuckDB unified queries
+#
+# Stack:
+#   - Redpanda (Kafka-compatible broker)
+#   - MinIO (S3 object storage for Iceberg)
+#   - Apache Polaris (Iceberg REST catalog)
+#   - DataShuttle runs natively (not in Docker — use release binary)
+#   - DuckDB runs in dashboard-server.py (unified query engine)
+#
+# Usage:
+#   docker compose -f examples/realtime-demo/docker-compose.yml up -d
+#   ./target/release/datashuttle start   # with DS_* env vars (see README.md)
+#   python3 examples/realtime-demo/producer.py 50
+#   python3 examples/realtime-demo/dashboard-server.py
+#   open http://localhost:3000
+
+services:
+  # ── Kafka (Redpanda — lightweight, no Zookeeper) ────────
+  redpanda:
+    image: redpandadata/redpanda:v24.3.1
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory 512M
+      - --overprovisioned
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+    ports:
+      - "19092:19092"   # Kafka external
+      - "18082:18082"   # Panda Proxy (REST API for DataShuttle)
+      - "18081:18081"   # Schema Registry
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9644/v1/status/ready || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  redpanda-init:
+    image: redpandadata/redpanda:v24.3.1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        rpk topic create clickstream \
+          --brokers redpanda:9092 \
+          --partitions 3 \
+          --config retention.ms=86400000
+        rpk topic create transactions \
+          --brokers redpanda:9092 \
+          --partitions 3 \
+          --config retention.ms=86400000
+        echo "Topics created"
+    restart: "no"
+
+  # ── Iceberg Infrastructure ──────────────────────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/warehouse;
+      echo 'Bucket created';
+      "
+    restart: "no"
+
+  polaris:
+    image: apache/polaris:latest
+    ports:
+      - "8181:8181"
+      - "8182:8182"
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      POLARIS_BOOTSTRAP_CREDENTIALS: "POLARIS,root,s3cr3t"
+    healthcheck:
+      test: ["CMD-SHELL", "echo > /dev/tcp/localhost/8181"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    volumes:
+      - ../polaris-config/application.properties:/deployments/config/application.properties:ro
+
+  polaris-init:
+    image: curlimages/curl:latest
+    depends_on:
+      polaris:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Polaris Init ==="
+        sleep 5
+        TOKEN=$$(curl -sf -X POST http://polaris:8181/api/catalog/v1/oauth/tokens \
+          -d "grant_type=client_credentials&client_id=root&client_secret=s3cr3t&scope=PRINCIPAL_ROLE:ALL" \
+          | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+        [ -z "$$TOKEN" ] && echo "ERROR: no token" && exit 1
+        AUTH="Authorization: Bearer $$TOKEN"
+        CT="Content-Type: application/json"
+
+        curl -sf -X POST http://polaris:8181/api/management/v1/catalogs \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{
+            "catalog": {
+              "name": "warehouse",
+              "type": "INTERNAL",
+              "properties": {"default-base-location": "s3://warehouse/"},
+              "storageConfigInfo": {
+                "storageType": "S3",
+                "allowedLocations": ["s3://warehouse/"],
+                "stsUnavailable": true,
+                "endpoint": "http://minio:9000",
+                "endpointInternal": "http://minio:9000",
+                "pathStyleAccess": true,
+                "region": "us-east-1"
+              }
+            }
+          }' || true
+
+        curl -sf -X POST http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{"catalogRole":{"name":"admin"}}' || true
+
+        curl -sf -X PUT http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles/admin/grants \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{"grant":{"type":"catalog","privilege":"CATALOG_MANAGE_CONTENT"}}' || true
+
+        curl -sf -X PUT http://polaris:8181/api/management/v1/principal-roles/service_admin/catalog-roles/warehouse \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{"catalogRole":{"name":"admin"}}' || true
+
+        echo "=== Polaris Init: done ==="
+    restart: "no"
+
+volumes:
+  minio-data:

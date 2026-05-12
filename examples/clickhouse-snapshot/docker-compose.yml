@@ -1,0 +1,288 @@
+# DataShuttle ClickHouse Parallel Read Demo
+#
+# 3-shard ClickHouse cluster with Distributed tables.
+# DataShuttle reads shards in parallel via MPP segment discovery.
+#
+# Usage:
+#   docker compose -f examples/clickhouse-snapshot/docker-compose.yml up -d
+#   # Wait for cluster init, then run DataShuttle shuttle
+#   # See README.md for full steps
+
+services:
+  clickhouse-1:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: clickhouse-1
+    ports:
+      - "8123:8123"    # HTTP interface (coordinator)
+      - "9009:9000"    # Native TCP
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./cluster-config.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ch1-data:/var/lib/clickhouse
+
+  clickhouse-2:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: clickhouse-2
+    ports:
+      - "8124:8123"
+      - "9010:9000"
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./cluster-config.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ch2-data:/var/lib/clickhouse
+
+  clickhouse-3:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: clickhouse-3
+    ports:
+      - "8125:8123"
+      - "9011:9000"
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./cluster-config.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ch3-data:/var/lib/clickhouse
+
+  # Initialize cluster: create distributed tables + seed data
+  clickhouse-init:
+    image: clickhouse/clickhouse-server:24.8
+    depends_on:
+      clickhouse-1:
+        condition: service_healthy
+      clickhouse-2:
+        condition: service_healthy
+      clickhouse-3:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Creating tables on all shards ==="
+        for host in clickhouse-1 clickhouse-2 clickhouse-3; do
+          echo "  Creating local tables on $$host..."
+          clickhouse-client --host $$host --database analytics --multiquery < /init/init-local.sql
+        done
+
+        echo "=== Creating distributed tables on coordinator ==="
+        clickhouse-client --host clickhouse-1 --database analytics --multiquery < /init/init-distributed.sql
+
+        echo "=== Seeding data via distributed tables ==="
+        clickhouse-client --host clickhouse-1 --database analytics --multiquery < /init/seed.sql
+
+        echo "=== Verifying shard distribution ==="
+        for host in clickhouse-1 clickhouse-2 clickhouse-3; do
+          count=$$(clickhouse-client --host $$host --database analytics -q "SELECT count() FROM events_local")
+          echo "  $$host: $$count rows in events_local"
+        done
+
+        total=$$(clickhouse-client --host clickhouse-1 --database analytics -q "SELECT count() FROM events")
+        echo "=== Total rows (distributed): $$total ==="
+    volumes:
+      - ./init-local.sql:/init/init-local.sql:ro
+      - ./init-distributed.sql:/init/init-distributed.sql:ro
+      - ./seed.sql:/init/seed.sql:ro
+    restart: "no"
+
+  # ── Iceberg Infrastructure ──────────────────────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/warehouse;
+      echo 'Bucket created';
+      "
+    restart: "no"
+
+  polaris:
+    image: apache/polaris:latest
+    ports:
+      - "8181:8181"
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      POLARIS_BOOTSTRAP_CREDENTIALS: "POLARIS,root,s3cr3t"
+    healthcheck:
+      test: ["CMD-SHELL", "echo > /dev/tcp/localhost/8181"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    volumes:
+      - ../../examples/polaris-config/application.properties:/deployments/config/application.properties:ro
+
+  polaris-init:
+    image: curlimages/curl:latest
+    depends_on:
+      polaris:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        sleep 5
+        TOKEN=$$(curl -sf -X POST http://polaris:8181/api/catalog/v1/oauth/tokens \
+          -d "grant_type=client_credentials&client_id=root&client_secret=s3cr3t&scope=PRINCIPAL_ROLE:ALL" \
+          | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+        [ -z "$$TOKEN" ] && echo "ERROR: no token" && exit 1
+        AUTH="Authorization: Bearer $$TOKEN"
+        CT="Content-Type: application/json"
+        curl -sf -X POST http://polaris:8181/api/management/v1/catalogs \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{"catalog":{"name":"warehouse","type":"INTERNAL","properties":{"default-base-location":"s3://warehouse/"},"storageConfigInfo":{"storageType":"S3","allowedLocations":["s3://warehouse/"],"stsUnavailable":true,"endpoint":"http://minio:9000","endpointInternal":"http://minio:9000","pathStyleAccess":true,"region":"us-east-1"}}}' || true
+        curl -sf -X POST http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles \
+          -H "$$AUTH" -H "$$CT" -d '{"catalogRole":{"name":"admin"}}' || true
+        curl -sf -X PUT http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles/admin/grants \
+          -H "$$AUTH" -H "$$CT" -d '{"grant":{"type":"catalog","privilege":"CATALOG_MANAGE_CONTENT"}}' || true
+        curl -sf -X PUT http://polaris:8181/api/management/v1/principal-roles/service_admin/catalog-roles/warehouse \
+          -H "$$AUTH" -H "$$CT" -d '{"catalogRole":{"name":"admin"}}' || true
+        echo "Polaris init done"
+    restart: "no"
+
+  # ── DataShuttle 3-node cluster ──────────────────────────
+  datashuttle-1:
+    image: datashuttle:local
+    hostname: datashuttle-1
+    ports:
+      - "8080:8080"    # API + UI (node 1 is primary)
+      - "9090:9090"
+    environment:
+      DS_NODE_ID: ds-node-1
+      DS_SERVER_API_PORT: "8080"
+      DS_METRICS_PORT: "9090"
+      DS_CATALOG_TYPE: rest
+      DS_CATALOG_URI: "http://polaris:8181/api/catalog"
+      DS_CATALOG_NAME: warehouse
+      DS_WAREHOUSE: "s3://warehouse/"
+      DS_S3_ENDPOINT: "http://minio:9000"
+      DS_S3_ACCESS_KEY: minioadmin
+      DS_S3_SECRET_KEY: minioadmin
+      DS_S3_REGION: us-east-1
+      DS_CATALOG_CLIENT_ID: root
+      DS_CATALOG_CLIENT_SECRET: s3cr3t
+      DS_GOSSIP_ADDR: "0.0.0.0:7946"
+      DS_GOSSIP_SEEDS: "datashuttle-2:7946,datashuttle-3:7946"
+      DS_CLUSTER_EXPECTED_NODES: "3"
+      DS_LOG_LEVEL: info
+    volumes:
+      - ./datashuttle.yaml:/datashuttle.yaml:ro
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      polaris-init:
+        condition: service_completed_successfully
+      clickhouse-init:
+        condition: service_completed_successfully
+
+  datashuttle-2:
+    image: datashuttle:local
+    hostname: datashuttle-2
+    ports:
+      - "8081:8080"
+    environment:
+      DS_NODE_ID: ds-node-2
+      DS_SERVER_API_PORT: "8080"
+      DS_METRICS_PORT: "9090"
+      DS_CATALOG_TYPE: rest
+      DS_CATALOG_URI: "http://polaris:8181/api/catalog"
+      DS_CATALOG_NAME: warehouse
+      DS_WAREHOUSE: "s3://warehouse/"
+      DS_S3_ENDPOINT: "http://minio:9000"
+      DS_S3_ACCESS_KEY: minioadmin
+      DS_S3_SECRET_KEY: minioadmin
+      DS_S3_REGION: us-east-1
+      DS_CATALOG_CLIENT_ID: root
+      DS_CATALOG_CLIENT_SECRET: s3cr3t
+      DS_GOSSIP_ADDR: "0.0.0.0:7946"
+      DS_GOSSIP_SEEDS: "datashuttle-1:7946,datashuttle-3:7946"
+      DS_CLUSTER_EXPECTED_NODES: "3"
+      DS_LOG_LEVEL: info
+    volumes:
+      - ./datashuttle.yaml:/datashuttle.yaml:ro
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      polaris-init:
+        condition: service_completed_successfully
+      clickhouse-init:
+        condition: service_completed_successfully
+
+  datashuttle-3:
+    image: datashuttle:local
+    hostname: datashuttle-3
+    ports:
+      - "8082:8080"
+    environment:
+      DS_NODE_ID: ds-node-3
+      DS_SERVER_API_PORT: "8080"
+      DS_METRICS_PORT: "9090"
+      DS_CATALOG_TYPE: rest
+      DS_CATALOG_URI: "http://polaris:8181/api/catalog"
+      DS_CATALOG_NAME: warehouse
+      DS_WAREHOUSE: "s3://warehouse/"
+      DS_S3_ENDPOINT: "http://minio:9000"
+      DS_S3_ACCESS_KEY: minioadmin
+      DS_S3_SECRET_KEY: minioadmin
+      DS_S3_REGION: us-east-1
+      DS_CATALOG_CLIENT_ID: root
+      DS_CATALOG_CLIENT_SECRET: s3cr3t
+      DS_GOSSIP_ADDR: "0.0.0.0:7946"
+      DS_GOSSIP_SEEDS: "datashuttle-1:7946,datashuttle-2:7946"
+      DS_CLUSTER_EXPECTED_NODES: "3"
+      DS_LOG_LEVEL: info
+    volumes:
+      - ./datashuttle.yaml:/datashuttle.yaml:ro
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      polaris-init:
+        condition: service_completed_successfully
+      clickhouse-init:
+        condition: service_completed_successfully
+
+volumes:
+  ch1-data:
+  ch2-data:
+  ch3-data:
+  minio-data:

@@ -1,0 +1,4 @@
+.pids/
+.logs/
+.docker-compose.override.yml
+.cluster-config-*.xml

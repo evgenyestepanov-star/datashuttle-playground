@@ -1,0 +1,566 @@
+# DataShuttle Demo Environment
+# Full demo with infrastructure + source databases.
+#
+# Default profile:    DataShuttle + Polaris + MinIO + PostgreSQL
+# full:               adds MySQL + MongoDB
+# clickhouse:         adds ClickHouse
+# playground:         adds Redpanda (Kafka), Cassandra, DynamoDB Local,
+#                     LocalStack (Kinesis), WireMock (REST) — consumed by
+#                     the /playground UI (M20) and `datashuttle playground`
+#                     CLI.
+# chaos:              adds Toxiproxy for Tier-4 chaos scenarios.
+# dremio / greenplum: analytical engines for cross-tool verification.
+#
+# Usage:
+#   docker compose -f examples/docker-compose.yml up -d
+#   docker compose -f examples/docker-compose.yml --profile full up -d
+#   docker compose -f examples/docker-compose.yml --profile playground up -d
+#   docker compose -f examples/docker-compose.yml --profile playground --profile chaos up -d
+#   docker compose -f examples/docker-compose.yml ps
+
+services:
+  # ── Iceberg Infrastructure ──────────────────────────────
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/warehouse;
+      mc mb --ignore-existing local/file-ingestion;
+      echo 'Buckets created';
+      "
+    restart: "no"
+
+  polaris:
+    image: apache/polaris:latest
+    ports:
+      - "8181:8181"
+      - "8182:8182"
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      # Pin bootstrap credentials so they survive restarts.
+      POLARIS_BOOTSTRAP_CREDENTIALS: "POLARIS,root,s3cr3t"
+    healthcheck:
+      # Polaris doesn't expose a /healthcheck endpoint — use TCP probe.
+      test: ["CMD-SHELL", "echo > /dev/tcp/localhost/8181"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    volumes:
+      - ./polaris-config/application.properties:/deployments/config/application.properties:ro
+
+  polaris-init:
+    image: curlimages/curl:latest
+    depends_on:
+      polaris:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Polaris Init: configuring catalog ==="
+
+        # 1. Get OAuth2 token using bootstrap credentials.
+        echo "Fetching OAuth2 token..."
+        TOKEN=$$(curl -sf -X POST http://polaris:8181/api/catalog/v1/oauth/tokens \
+          -d "grant_type=client_credentials&client_id=root&client_secret=s3cr3t&scope=PRINCIPAL_ROLE:ALL" \
+          | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+
+        if [ -z "$$TOKEN" ]; then
+          echo "ERROR: Failed to obtain OAuth2 token"
+          exit 1
+        fi
+        echo "Token obtained."
+
+        AUTH="Authorization: Bearer $$TOKEN"
+        CT="Content-Type: application/json"
+
+        # 2. Create warehouse catalog (INTERNAL type, S3 storage with direct MinIO access).
+        echo "Creating warehouse catalog..."
+        curl -sf -X POST http://polaris:8181/api/management/v1/catalogs \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{
+            "catalog": {
+              "name": "warehouse",
+              "type": "INTERNAL",
+              "properties": {
+                "default-base-location": "s3://warehouse/"
+              },
+              "storageConfigInfo": {
+                "storageType": "S3",
+                "allowedLocations": ["s3://warehouse/"],
+                "stsUnavailable": true,
+                "endpoint": "http://minio:9000",
+                "endpointInternal": "http://minio:9000",
+                "pathStyleAccess": true,
+                "region": "us-east-1"
+              }
+            }
+          }' && echo " OK" || echo " (may already exist)"
+
+        # 3. Create a catalog admin role with CATALOG_MANAGE_CONTENT.
+        echo "Creating catalog admin role..."
+        curl -sf -X POST http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{
+            "catalogRole": {
+              "name": "admin"
+            }
+          }' && echo " OK" || echo " (may already exist)"
+
+        # 4. Grant CATALOG_MANAGE_CONTENT to the admin role.
+        echo "Granting CATALOG_MANAGE_CONTENT..."
+        curl -sf -X PUT http://polaris:8181/api/management/v1/catalogs/warehouse/catalog-roles/admin/grants \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{
+            "grant": {
+              "type": "catalog",
+              "privilege": "CATALOG_MANAGE_CONTENT"
+            }
+          }' && echo " OK" || echo " (may already exist)"
+
+        # 5. Assign admin catalog role to the service_admin principal role.
+        echo "Assigning admin role to service_admin..."
+        curl -sf -X PUT http://polaris:8181/api/management/v1/principal-roles/service_admin/catalog-roles/warehouse \
+          -H "$$AUTH" -H "$$CT" \
+          -d '{
+            "catalogRole": {
+              "name": "admin"
+            }
+          }' && echo " OK" || echo " (may already exist)"
+
+        echo "=== Polaris Init: complete ==="
+    restart: "no"
+
+  # ── DataShuttle ─────────────────────────────────────────
+
+  datashuttle:
+    image: ghcr.io/datashuttle-ai/datashuttle:latest
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      DS_SERVER_API_PORT: "8080"
+      DS_METRICS_PORT: "9090"
+      DS_CATALOG_TYPE: rest
+      DS_CATALOG_URI: "http://polaris:8181/api/catalog"
+      DS_CATALOG_NAME: warehouse
+      DS_WAREHOUSE: "s3://warehouse/"
+      DS_S3_ENDPOINT: "http://minio:9000"
+      DS_S3_ACCESS_KEY: minioadmin
+      DS_S3_SECRET_KEY: minioadmin
+      DS_S3_REGION: us-east-1
+      # Polaris OAuth2 credentials (matches POLARIS_BOOTSTRAP_CREDENTIALS).
+      DS_CATALOG_CLIENT_ID: root
+      DS_CATALOG_CLIENT_SECRET: s3cr3t
+      DS_LOG_LEVEL: info
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      polaris-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Source Databases (default: PostgreSQL) ───────────────
+
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ecommerce
+    command: >
+      postgres
+        -c wal_level=logical
+        -c max_replication_slots=10
+        -c max_wal_senders=10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      # docker-init.sql is the static sibling of init.sql — same schema
+      # + seed, but with a cluster-wide `datashuttle_pub` publication
+      # instead of the `{shuttle}_pub` / `{namespace}` placeholders
+      # that the playground session manager substitutes at runtime.
+      # docker-entrypoint-initdb.d runs its scripts verbatim with no
+      # substitution, so mounting init.sql here would crash initdb on
+      # `schema "{namespace}" does not exist`.
+      - ./postgres-cdc/docker-init.sql:/docker-entrypoint-initdb.d/01-init.sql
+
+  # ── Additional Sources (profile: full) ──────────────────
+
+  mysql:
+    profiles: ["full"]
+    image: mysql:8.4
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: iot
+      MYSQL_USER: datashuttle
+      MYSQL_PASSWORD: datashuttle
+    command: >
+      --server-id=1
+      --log-bin=mysql-bin
+      --binlog-format=ROW
+      --binlog-row-image=FULL
+      --gtid-mode=ON
+      --enforce-gtid-consistency=ON
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./mysql-cdc/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+
+  mongodb:
+    profiles: ["full"]
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - mongodb-data:/data/db
+
+  mongodb-init:
+    profiles: ["full"]
+    image: mongo:7
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    entrypoint: >
+      mongosh --host mongodb --eval "
+        try { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongodb:27017'}]}); }
+        catch(e) { if (e.codeName !== 'AlreadyInitialized') throw e; }
+        print('Replica set initialized');
+      "
+    restart: "no"
+
+  mongodb-seed:
+    profiles: ["full"]
+    image: mongo:7
+    depends_on:
+      mongodb-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./mongodb-cdc/init.js:/init.js
+    entrypoint: ["mongosh", "--host", "mongodb", "/init.js"]
+    restart: "no"
+
+  # ── ClickHouse (profile: clickhouse or full) ─────────────
+
+  clickhouse:
+    profiles: ["full", "clickhouse"]
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9009:9000"   # Native TCP (mapped to 9009 to avoid MinIO conflict)
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse-snapshot/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+
+  # ── Nessie + Dremio (profile: dremio) ───────────────────
+  # Dremio OSS 26 reads Iceberg tables natively via its NESSIE source type.
+  # DataShuttle writes V2 tables to Nessie (Iceberg REST spec) → MinIO.
+  # Dremio reads via Nessie → MinIO. Full e2e SELECT verification.
+
+  nessie:
+    profiles: ["dremio"]
+    image: ghcr.io/projectnessie/nessie:latest
+    ports:
+      - "19120:19120"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      # SmallRye reads env vars with dots as property keys directly.
+      - nessie.version.store.type=IN_MEMORY
+      - nessie.catalog.default-warehouse=warehouse
+      - nessie.catalog.warehouses.warehouse.location=s3://warehouse/
+      - nessie.catalog.service.s3.default-options.region=us-east-1
+      - nessie.catalog.service.s3.default-options.path-style-access=true
+      - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000/
+      - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
+      - nessie.catalog.secrets.access-key.name=minioadmin
+      - nessie.catalog.secrets.access-key.secret=minioadmin
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:19120/api/v2/config > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  dremio:
+    profiles: ["dremio"]
+    image: dremio/dremio-oss:26.0.5
+    ports:
+      - "9047:9047"   # Web UI + REST API
+      - "31010:31010" # JDBC/ODBC
+      - "32010:32010" # Arrow Flight
+    depends_on:
+      nessie:
+        condition: service_healthy
+    environment:
+      DREMIO_JAVA_SERVER_EXTRA_OPTS: "-Dpaths.dist=file:///opt/dremio/data/dist"
+      DREMIO_MAX_MEMORY_SIZE_MB: 4096
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9047 > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 60s
+    volumes:
+      - dremio-data:/opt/dremio/data
+
+  # ── Greenplum (profile: greenplum) ──────────────────────
+
+  greenplum:
+    profiles: ["greenplum"]
+    image: datagrip/greenplum:latest
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "su - gpadmin -c 'psql -d postgres -c \"SELECT 1\"' > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  greenplum-init:
+    profiles: ["greenplum"]
+    image: postgres:16
+    depends_on:
+      greenplum:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        export PGPASSWORD=gpadmin
+        # Wait for TCP connectivity
+        for i in $$(seq 1 30); do
+          if psql -h greenplum -p 5432 -U gpadmin -d postgres -c "SELECT 1" > /dev/null 2>&1; then
+            break
+          fi
+          sleep 2
+        done
+        # Set password for external md5 auth
+        psql -h greenplum -p 5432 -U gpadmin -d postgres -c "ALTER ROLE gpadmin PASSWORD 'gpadmin'"
+        # Create test schema
+        psql -h greenplum -p 5432 -U gpadmin -d postgres <<'SQL'
+          CREATE TABLE IF NOT EXISTS gp_orders (
+              id SERIAL,
+              customer TEXT NOT NULL,
+              amount NUMERIC(10,2) NOT NULL,
+              region TEXT NOT NULL
+          ) DISTRIBUTED BY (id);
+
+          INSERT INTO gp_orders (customer, amount, region)
+          SELECT
+              'customer_' || i,
+              (random() * 1000)::numeric(10,2),
+              CASE WHEN i % 3 = 0 THEN 'us-east'
+                   WHEN i % 3 = 1 THEN 'eu-west'
+                   ELSE 'ap-south' END
+          FROM generate_series(1, 500) AS i;
+        SQL
+        echo "Greenplum init complete: 500 rows in gp_orders"
+    restart: "no"
+
+  # ── Playground Sources (profile: playground) ────────────
+  # Free-only OSS containers consumed by scenarios defined in
+  # examples/manifest.json (M20 Interactive Playground).
+
+  redpanda:
+    profiles: ["playground"]
+    image: redpandadata/redpanda:latest
+    # Kafka-compatible single-node broker. The realtime-demo uses its own
+    # compose file on ports 18082/19092; here we expose the standard 9092
+    # so playground scenarios can share the cluster-wide compose.
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr=0.0.0.0:8081
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --mode=dev-container
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+      - "18082:18082"
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info --brokers=localhost:9092 > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+  cassandra:
+    profiles: ["playground"]
+    image: cassandra:5
+    ports:
+      - "9042:9042"
+    environment:
+      # Single-node dev topology. CDC enabled so the connector can consume
+      # commit-log segments from /var/lib/cassandra/cdc_raw once flushed.
+      CASSANDRA_CLUSTER_NAME: ds-playground
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      HEAP_NEWSIZE: 128M
+      MAX_HEAP_SIZE: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' localhost 9042 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 45s
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+
+  dynamodb-local:
+    profiles: ["playground"]
+    image: amazon/dynamodb-local:latest
+    # The DynamoDB Local image runs as uid 1000 and writes its database
+    # file into the working directory; mounting a named volume avoids
+    # permission issues on macOS/Linux host filesystems.
+    user: "1000"
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "./data"]
+    working_dir: /home/dynamodblocal
+    ports:
+      - "8000:8000"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    healthcheck:
+      # DynamoDB Local has no /health; a ListTables call against the
+      # default region with any credentials returns 200 once ready.
+      test: ["CMD-SHELL", "wget -q -O - 'http://localhost:8000/' 2>/dev/null | grep -q 'healthy' || exit 0"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    profiles: ["playground"]
+    # #796 — pin to 3.0.2. `localstack/localstack:latest` now requires
+    # LOCALSTACK_AUTH_TOKEN even for the community-tier services we use
+    # (Kinesis + SQS) and exits with code 55 at startup if the env var is
+    # missing. 3.0.2 still starts unauthenticated for the same services,
+    # which is what the playground demo needs. Upgrade path: when a
+    # successor image that keeps Kinesis + SQS free lands (or when we
+    # want to require the free LocalStack account), bump to that pin.
+    image: localstack/localstack:3.0.2
+    # Community image — free. Only Kinesis + SQS are enabled; the rest of
+    # the AWS surface is disabled to keep memory and startup time bounded.
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: kinesis,sqs
+      DEBUG: "0"
+      LS_LOG: warn
+      KINESIS_PROVIDER: kinesis-mock
+      DOCKER_HOST: unix:///var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"kinesis\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  wiremock:
+    profiles: ["playground"]
+    image: wiremock/wiremock:3.9.2
+    ports:
+      - "8888:8080"
+    command: ["--port", "8080", "--verbose", "--global-response-templating"]
+    volumes:
+      - ./playground/wiremock:/home/wiremock:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/__admin/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Chaos (profile: chaos) ───────────────────────────────
+  # Toxiproxy sits between DataShuttle and a source to inject latency,
+  # packet loss, or full disconnects for Tier-4 chaos scenarios.
+
+  toxiproxy:
+    profiles: ["chaos"]
+    image: ghcr.io/shopify/toxiproxy:latest
+    ports:
+      - "8474:8474"   # admin API
+      - "28015:28015" # proxy passthrough port for Kafka
+      - "25432:25432" # proxy passthrough port for Postgres
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8474/version > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  minio-data:
+  mongodb-data:
+  clickhouse-data:
+  dremio-data:
+  redpanda-data:
+  cassandra-data:
+  dynamodb-data:

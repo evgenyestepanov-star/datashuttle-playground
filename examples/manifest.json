@@ -600,7 +600,8 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "playground"
@@ -661,7 +662,8 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "playground"
