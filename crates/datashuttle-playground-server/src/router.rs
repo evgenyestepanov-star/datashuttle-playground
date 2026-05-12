@@ -1,20 +1,24 @@
-//! Minimal HTTP surface for the standalone playground server.
+//! HTTP surface for the standalone playground server.
 //!
-//! The full handler suite (session lifecycle, action execution, scenario
-//! orchestration) lives inside OSS api-core today and depends on the
-//! private DataShuttle stack. Phase 5.B will introduce a public
-//! extension point in OSS so those handlers can be ported here without
-//! pulling in private internals.
+//! Phase 5.C wired in the full session-lifecycle handler suite ported
+//! from OSS api-core (commit `c8959ae6^`). The binary now serves:
 //!
-//! Until then this binary exposes:
-//!   * `GET /health`           — liveness probe (always 200).
-//!   * `GET /api/v1/playground/manifest` — reads the configured manifest
-//!     and returns the validated, parsed scenario list.
-//!   * `GET /metrics`          — prometheus exposition for the
-//!     playground metric bundle.
+//!   * `GET /health`                    — liveness probe (always 200).
+//!   * `GET /metrics`                   — prometheus exposition.
+//!   * `GET /api/v1/playground/health`  — unauthenticated probe.
+//!   * `GET /api/v1/playground/manifest`— scenario list (unauth so
+//!     the UI can render the marketing view; sessions still need auth).
+//!   * `POST/GET/DELETE /api/v1/playground/sessions[/...]`
+//!     — full session lifecycle.
+//!   * `POST /api/v1/playground/sessions/:id/actions/:action_id`
+//!     — execute one of the manifest's whitelisted actions.
 //!
-//! Authenticated requests must carry `Authorization: Bearer <token>`
-//! when `PLAYGROUND_TOKEN` is set; unset means dev mode (no auth).
+//! Auth layering: the inbound `Authorization: Bearer <PLAYGROUND_TOKEN>`
+//! gate is the same for every protected path (handled by
+//! [`auth_middleware`]). On top of that, [`identity_middleware`] reads
+//! the `X-Datashuttle-*` headers the OSS reverse-proxy injects and
+//! builds an [`Identity`](crate::identity::Identity) that handlers
+//! downcast out of request extensions.
 
 use std::sync::Arc;
 
@@ -28,43 +32,64 @@ use datashuttle_playground::manifest::Manifest;
 use datashuttle_playground::metrics::PlaygroundMetrics;
 use datashuttle_playground::quota::PlaygroundQuotaTracker;
 use datashuttle_playground::sessions::SessionManager;
+use datashuttle_playground::tcp::PlaygroundDispatcher;
 use prometheus::{Encoder, Registry, TextEncoder};
 use serde::Serialize;
 
+use crate::api_client::ApiClient;
 use crate::config::Config;
+use crate::handlers;
+use crate::identity::identity_middleware;
 
 pub struct ServerState {
     pub config: Config,
+    /// Loaded manifest. Held on state so future routes (e.g. catalog
+    /// of source connectors) can reach it without going through the
+    /// session manager. Handlers today read it via `sessions.manifest()`.
+    #[allow(dead_code)]
     pub manifest: Option<Arc<Manifest>>,
-    // Phase 5.B will wire these into the full session-lifecycle handlers
-    // currently still living inside OSS api-core. Holding them on
-    // `ServerState` now keeps the binary's wiring stable across the
-    // cutover.
-    #[allow(dead_code)]
     pub sessions: Option<Arc<SessionManager>>,
-    #[allow(dead_code)]
     pub quota: Arc<PlaygroundQuotaTracker>,
-    #[allow(dead_code)]
     pub metrics: Arc<PlaygroundMetrics>,
     pub prom_registry: Arc<Registry>,
+    /// Concrete source dispatcher (postgres + mysql TCP pools). Built
+    /// once at boot; lazy-init internally so unused pools don't pay
+    /// connection cost.
+    pub dispatcher: Arc<dyn PlaygroundDispatcher>,
+    /// HTTP client for callbacks to the OSS api (`/api/v1/sql` and
+    /// catalog DELETE). `None` when the deploy hasn't set
+    /// `PLAYGROUND_API_BASE_URL` / `PLAYGROUND_SERVICE_TOKEN`; handlers
+    /// that need it return 503.
+    pub api_client: Option<Arc<ApiClient>>,
 }
 
 pub fn router(state: Arc<ServerState>) -> Router {
+    // Session-lifecycle routes ported from OSS handlers — these need
+    // `Identity` from the X-Datashuttle-* headers, so we mount them
+    // under the identity middleware.
+    let session_routes = handlers::routes();
+
     let api_v1 = Router::new()
-        .route("/playground/manifest", get(get_manifest))
-        .route("/playground/health", get(health));
+        .route("/playground/health", get(health))
+        .nest("/playground", session_routes);
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
         .nest("/api/v1", api_v1);
 
+    // Layer order (axum applies bottom-up; topmost listed runs first
+    // on inbound):
+    //   1. auth_middleware  — verify shared bearer.
+    //   2. identity_middleware — extract Identity from headers.
+    //   3. handlers — see Identity in extensions.
     let auth_state = state.clone();
-    app.layer(middleware::from_fn(move |req, next| {
-        let st = auth_state.clone();
-        async move { auth_middleware(st, req, next).await }
-    }))
-    .with_state(state)
+    app.layer(middleware::from_fn(identity_middleware))
+        .layer(middleware::from_fn(move |req, next| {
+            let st = auth_state.clone();
+            async move { auth_middleware(st, req, next).await }
+        }))
+        .with_state(state)
 }
 
 #[derive(Serialize)]
@@ -78,19 +103,6 @@ async fn health() -> Json<HealthResp> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
-}
-
-async fn get_manifest(State(state): State<Arc<ServerState>>) -> Response {
-    match state.manifest.as_deref() {
-        Some(m) => Json(m).into_response(),
-        None => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "playground manifest not loaded — set PLAYGROUND_MANIFEST or mount one at /opt/datashuttle/examples/manifest.json"
-            })),
-        )
-            .into_response(),
-    }
 }
 
 async fn metrics_handler(State(state): State<Arc<ServerState>>) -> Response {
@@ -113,10 +125,16 @@ async fn auth_middleware(
     next: Next,
 ) -> Response {
     let path = req.uri().path();
-    // Health and metrics are unauthenticated — they're standard
-    // probe surfaces that ops dashboards/load balancers must reach
-    // without credentials.
-    if path == "/health" || path == "/metrics" || path == "/api/v1/playground/health" {
+    // Health and metrics are unauthenticated — standard probe
+    // surfaces dashboards/load balancers must reach without
+    // credentials. Manifest is also unauth so the public UI can
+    // render the scenario list pre-login (`get_manifest` only
+    // exposes scenario metadata, no tenant data).
+    if path == "/health"
+        || path == "/metrics"
+        || path == "/api/v1/playground/health"
+        || path == "/api/v1/playground/manifest"
+    {
         return next.run(req).await;
     }
 

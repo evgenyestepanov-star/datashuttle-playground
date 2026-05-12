@@ -8,6 +8,10 @@ repository.workspace = true
 homepage.workspace = true
 description = "Standalone HTTP server for the DataShuttle playground."
 
+[lib]
+name = "datashuttle_playground_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "datashuttle-playground-server"
 path = "src/main.rs"
@@ -35,5 +39,13 @@ futures.workspace = true
 sqlx.workspace = true
 mysql_async.workspace = true
 
+# Phase 5.C — session handlers: identity middleware, HTTP callbacks
+# to OSS api, source-SQL shell dispatch, deterministic UUIDs.
+chrono.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+base64.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tower.workspace = true

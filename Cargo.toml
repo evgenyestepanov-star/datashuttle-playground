@@ -43,6 +43,12 @@ futures = "0.3"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "chrono", "uuid", "json", "migrate"] }
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
 
+# Phase 5.C session handlers — HTTP callbacks to OSS api, base64 encode
+# for source-SQL shell dispatch, tower for integration tests.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+base64 = "0.22"
+tower = "0.5"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

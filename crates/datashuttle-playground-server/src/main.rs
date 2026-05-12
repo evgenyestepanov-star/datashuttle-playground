@@ -1,11 +1,9 @@
 //! `datashuttle-playground-server` — standalone HTTP entrypoint.
 //!
-//! The full session-lifecycle handler suite (create, reset, end, execute
-//! action) currently lives inside the OSS api crate because of its
-//! coupling to private types. Phase 5.B will lift that coupling via a
-//! public extension point and reintroduce the full surface here. Today
-//! the server boots a minimal router (health, manifest read, prometheus
-//! metrics) so deployments and CI can validate the binary end-to-end.
+//! Phase 5.C completed the playground extraction. The binary now boots
+//! the full session-lifecycle handler suite (create, reset, end,
+//! execute action) ported from OSS api-core, alongside the source-side
+//! TCP dispatcher and the OSS api callback client.
 
 use std::sync::Arc;
 
@@ -14,20 +12,14 @@ use datashuttle_playground::manifest::Manifest;
 use datashuttle_playground::metrics::PlaygroundMetrics;
 use datashuttle_playground::quota::PlaygroundQuotaTracker;
 use datashuttle_playground::sessions::SessionManager;
+use datashuttle_playground::tcp::PlaygroundDispatcher;
 use prometheus::Registry;
 use tracing::{info, warn};
 
-mod config;
-// Phase 5.C — TCP-backed source dispatcher migrated here from
-// `datashuttle-cloud::playground`. Wired into ServerState by the
-// session-lifecycle handler suite (Task 7); until that lands the
-// module compiles but no caller references its surface — keep clippy
-// quiet so `-D warnings` builds don't break in the interim.
-#[allow(dead_code)]
-mod dispatcher;
-mod router;
-
-use crate::router::{router, ServerState};
+use datashuttle_playground_server::api_client::ApiClient;
+use datashuttle_playground_server::config;
+use datashuttle_playground_server::dispatcher;
+use datashuttle_playground_server::router::{router, ServerState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -64,6 +56,39 @@ async fn main() -> anyhow::Result<()> {
         cfg.session_quota_per_day,
     ));
 
+    // Source dispatcher (postgres + mysql TCP pools). Lazy-init
+    // internally — unused pools pay zero connection cost at boot.
+    let dispatcher: Arc<dyn PlaygroundDispatcher> = Arc::new(dispatcher::build_dispatcher());
+
+    // OSS api callback client. Optional — when either env var is
+    // missing we boot without it and handlers that need it return
+    // 503. Lets a partial deploy still expose health/manifest.
+    let api_client: Option<Arc<ApiClient>> = match (
+        cfg.api_base_url.as_ref(),
+        cfg.api_service_token.as_ref(),
+    ) {
+        (Some(base), Some(token)) => {
+            match ApiClient::new(base.clone(), token.clone(), cfg.api_timeout) {
+                Ok(c) => {
+                    info!(base_url = %base, "playground: api callback client configured");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    warn!(error = %e, "playground: failed to build api callback client");
+                    None
+                }
+            }
+        }
+        _ => {
+            warn!(
+                "PLAYGROUND_API_BASE_URL or PLAYGROUND_SERVICE_TOKEN is unset — \
+                 session create / reset / SQL actions will return 503 until \
+                 both are provided."
+            );
+            None
+        }
+    };
+
     let state = Arc::new(ServerState {
         config: cfg.clone(),
         manifest,
@@ -71,6 +96,8 @@ async fn main() -> anyhow::Result<()> {
         quota,
         metrics,
         prom_registry,
+        dispatcher,
+        api_client,
     });
 
     let app = router(state);
