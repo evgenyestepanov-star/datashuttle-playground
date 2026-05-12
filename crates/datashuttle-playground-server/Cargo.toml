@@ -26,5 +26,14 @@ anyhow.workspace = true
 thiserror.workspace = true
 prometheus.workspace = true
 
+# Phase 5.C — TCP-backed source dispatcher moved here from
+# `datashuttle-cloud::playground`. The trait + safety validators live
+# in the foundation lib (`datashuttle-playground::tcp`); this binary
+# owns the concrete sqlx + mysql_async pool implementation.
+async-trait.workspace = true
+futures.workspace = true
+sqlx.workspace = true
+mysql_async.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

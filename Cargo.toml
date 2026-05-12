@@ -35,6 +35,14 @@ thiserror = "2"
 prometheus = { version = "0.13", features = ["process"] }
 sha2 = "0.10"
 
+# TCP-backed source dispatcher (Phase 5.C extraction — moved out of
+# `datashuttle-cloud::playground` into `datashuttle-playground-server`).
+# Versions pinned to match the cloud workspace so a shared `Cargo.lock`
+# resolution across this repo + datashuttle-cloud unifies on one set.
+futures = "0.3"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "chrono", "uuid", "json", "migrate"] }
+mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

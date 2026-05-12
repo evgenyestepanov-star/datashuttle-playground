@@ -18,6 +18,13 @@ use prometheus::Registry;
 use tracing::{info, warn};
 
 mod config;
+// Phase 5.C — TCP-backed source dispatcher migrated here from
+// `datashuttle-cloud::playground`. Wired into ServerState by the
+// session-lifecycle handler suite (Task 7); until that lands the
+// module compiles but no caller references its surface — keep clippy
+// quiet so `-D warnings` builds don't break in the interim.
+#[allow(dead_code)]
+mod dispatcher;
 mod router;
 
 use crate::router::{router, ServerState};
