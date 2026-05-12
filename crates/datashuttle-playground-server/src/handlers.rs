@@ -1002,16 +1002,86 @@ async fn produce_kafka(
     repeat: u32,
     session: &Session,
 ) -> Result<(String, String), String> {
+    use base64::Engine;
     validate_example_relative_path(payload_file)?;
-    let repeat = repeat.min(100_000);
-    let cmd = format!(
-        "for i in $(seq 1 {repeat}); do cat /opt/datashuttle/examples/{payload_file}; echo; done | \
-         docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T redpanda rpk topic produce {topic}",
-        repeat = repeat,
-        payload_file = shell_quote(payload_file),
-        topic = shell_quote(&kafka_topic_for(session))
-    );
-    run_shell(&cmd, session).await
+    let repeat = repeat.min(100_000) as usize;
+    let topic = kafka_topic_for(session);
+
+    // Read the payload from the baked examples tree. `.json` → produce
+    // through Pandaproxy's JSON endpoint with raw JSON value; anything
+    // else (e.g. `.raw` poison payloads) → binary endpoint with base64.
+    let path = std::path::Path::new("/opt/datashuttle/examples").join(payload_file);
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("read {payload_file}: {e}"))?;
+
+    let is_json = std::path::Path::new(payload_file)
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    let (content_type, body) = if is_json {
+        // Validate once so we can build a typed records[] array. If the
+        // file is invalid JSON we fall through to binary so the poison
+        // case still works even with a `.json` extension.
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(v) => {
+                let records: Vec<Value> = (0..repeat)
+                    .map(|_| serde_json::json!({"value": v.clone()}))
+                    .collect();
+                (
+                    "application/vnd.kafka.json.v2+json",
+                    serde_json::json!({"records": records}),
+                )
+            }
+            Err(_) => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let records: Vec<Value> = (0..repeat)
+                    .map(|_| serde_json::json!({"value": encoded.clone()}))
+                    .collect();
+                (
+                    "application/vnd.kafka.binary.v2+json",
+                    serde_json::json!({"records": records}),
+                )
+            }
+        }
+    } else {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let records: Vec<Value> = (0..repeat)
+            .map(|_| serde_json::json!({"value": encoded.clone()}))
+            .collect();
+        (
+            "application/vnd.kafka.binary.v2+json",
+            serde_json::json!({"records": records}),
+        )
+    };
+
+    let host =
+        std::env::var("DS_KAFKA_PLAYGROUND_HOST").unwrap_or_else(|_| "redpanda-playground".into());
+    let port = std::env::var("DS_KAFKA_PLAYGROUND_PORT").unwrap_or_else(|_| "8082".into());
+    let url = format!("http://{host}:{port}/topics/{topic}");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Content-Type", content_type)
+        .body(serde_json::to_vec(&body).map_err(|e| format!("encode body: {e}"))?)
+        .send()
+        .await
+        .map_err(|e| format!("pandaproxy POST {url}: {e}"))?;
+    let status = resp.status();
+    let resp_body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "pandaproxy returned {status} for topic {topic}: {resp_body}"
+        ));
+    }
+    Ok((
+        format!(
+            "produced {repeat} record(s) to {topic} via {host}:{port} ({content_type})"
+        ),
+        resp_body,
+    ))
 }
 
 async fn upload_file(payload_file: &str, session: &Session) -> Result<(String, String), String> {
