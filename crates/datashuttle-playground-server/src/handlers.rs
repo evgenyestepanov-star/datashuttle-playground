@@ -1329,6 +1329,24 @@ fn build_source_coords_registry() -> SourceCoordsRegistry {
             default_pw: "rootpass",
         },
     );
+    // Kafka (Redpanda single-broker sidecar). `db` / `user` / `pw`
+    // are unused for the kafka client but the substitution helper
+    // expects them populated; templates only touch
+    // `{source_host}` + `{source_port}`. Port `9092` is Redpanda's
+    // PLAINTEXT listener inside the compose network; on the local
+    // demo bundle (which exposes 19092 to host) the env block
+    // overrides this default.
+    entries.insert(
+        "redpanda",
+        SourceCoordsSpec {
+            env_prefix: "DS_KAFKA_PLAYGROUND",
+            default_host: "localhost",
+            default_port: "19092",
+            default_db: "",
+            default_user: "",
+            default_pw: "",
+        },
+    );
     SourceCoordsRegistry { entries }
 }
 
