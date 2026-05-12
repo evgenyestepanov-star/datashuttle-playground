@@ -111,15 +111,75 @@ impl ApiClient {
         })
     }
 
-    /// POST `/api/v1/sql` with the user's effective identity carried
-    /// via impersonation headers. Returns the response body as JSON on
-    /// success; on HTTP >= 400 returns [`ApiCallError::Status`] so
-    /// callers can record the failure as a session event.
+    /// Execute one DataShuttle SQL statement against the OSS api.
+    ///
+    /// Pre-Phase-4.A the OSS api shipped a generic dispatcher at
+    /// `POST /api/v1/sql` that parsed the statement and routed it to
+    /// the right typed handler. That endpoint was retired in commit
+    /// 9e925433 (#1032 "Delete crates/datashuttle-api/src/query/"),
+    /// so we now do the same dispatch client-side and post each
+    /// statement to its typed handler. Supports the statement set the
+    /// playground's shuttle.sql templates emit:
+    ///
+    ///   * `CREATE CONNECTION ...`   → POST /api/v1/connections
+    ///   * `CREATE SHUTTLE ...`      → POST /api/v1/shuttles
+    ///   * `RESUME SHUTTLE <name>`   → POST /api/v1/shuttles/<name>/resume
+    ///   * `PAUSE SHUTTLE <name>`    → POST /api/v1/shuttles/<name>/pause
+    ///   * `DROP SHUTTLE <name>`     → DELETE /api/v1/shuttles/<name>
+    ///   * `DROP CONNECTION <name>`  → DELETE /api/v1/connections/<name>
+    ///
+    /// Anything else returns a structured `ApiCallError::Status` with
+    /// a 400-equivalent that says "unsupported playground SQL".
     pub async fn exec_sql(&self, identity: &Identity, sql: &str) -> Result<Value, ApiCallError> {
-        let body = serde_json::json!({ "sql": sql });
-        self.request("POST", "/api/v1/sql", Some(body), identity)
-            .await
-            .map(|(_, v)| v)
+        match classify_statement(sql) {
+            Some(Dispatch::CreateConnection) => {
+                let body = serde_json::json!({ "sql": sql });
+                self.request("POST", "/api/v1/connections", Some(body), identity)
+                    .await
+                    .map(|(_, v)| v)
+            }
+            Some(Dispatch::CreateShuttle) => {
+                let body = serde_json::json!({ "sql": sql });
+                self.request("POST", "/api/v1/shuttles", Some(body), identity)
+                    .await
+                    .map(|(_, v)| v)
+            }
+            Some(Dispatch::ResumeShuttle(name)) => {
+                let path = format!("/api/v1/shuttles/{name}/resume");
+                self.request("POST", &path, None, identity)
+                    .await
+                    .map(|(_, v)| v)
+            }
+            Some(Dispatch::PauseShuttle(name)) => {
+                let path = format!("/api/v1/shuttles/{name}/pause");
+                self.request("POST", &path, None, identity)
+                    .await
+                    .map(|(_, v)| v)
+            }
+            Some(Dispatch::DropShuttle(name)) => {
+                let path = format!("/api/v1/shuttles/{name}");
+                self.request("DELETE", &path, None, identity)
+                    .await
+                    .map(|(_, v)| v)
+            }
+            Some(Dispatch::DropConnection(name)) => {
+                let path = format!("/api/v1/connections/{name}");
+                self.request("DELETE", &path, None, identity)
+                    .await
+                    .map(|(_, v)| v)
+            }
+            None => Err(ApiCallError::Status {
+                method: "POST".to_string(),
+                url_path: "/api/v1/sql".to_string(),
+                status: 400,
+                body: format!(
+                    "unsupported playground SQL — only CREATE/DROP \
+                     CONNECTION + CREATE/RESUME/PAUSE/DROP SHUTTLE are \
+                     dispatched. Statement: {}",
+                    first_chars(sql, 120)
+                ),
+            }),
+        }
     }
 
     /// General-purpose call. Method + path; `body` is JSON-serialised
@@ -180,6 +240,93 @@ impl ApiClient {
     }
 }
 
+/// Statement classes the playground SQL templates emit. Determines
+/// which typed api endpoint a `exec_sql` call lands on.
+enum Dispatch {
+    CreateConnection,
+    CreateShuttle,
+    ResumeShuttle(String),
+    PauseShuttle(String),
+    DropShuttle(String),
+    DropConnection(String),
+}
+
+/// Strip line comments + leading whitespace, uppercase the leading
+/// tokens, and pattern-match the playground statement shapes. We
+/// don't pull in `datashuttle-core::sql::parser` here — that would
+/// drag the whole core crate (DataFusion / Arrow chain) into the
+/// playground server's dep graph. The template SQL we author is a
+/// small enough surface that hand-rolled prefix matching is fine.
+fn classify_statement(sql: &str) -> Option<Dispatch> {
+    let stripped = strip_sql_comments(sql);
+    let trimmed = stripped.trim().trim_end_matches(';').trim();
+    let upper = trimmed.to_ascii_uppercase();
+
+    if upper.starts_with("CREATE CONNECTION") {
+        return Some(Dispatch::CreateConnection);
+    }
+    if upper.starts_with("CREATE SHUTTLE") {
+        return Some(Dispatch::CreateShuttle);
+    }
+    if let Some(rest) = upper.strip_prefix("RESUME SHUTTLE") {
+        return extract_name(rest, trimmed, "RESUME SHUTTLE").map(Dispatch::ResumeShuttle);
+    }
+    if let Some(rest) = upper.strip_prefix("PAUSE SHUTTLE") {
+        return extract_name(rest, trimmed, "PAUSE SHUTTLE").map(Dispatch::PauseShuttle);
+    }
+    if let Some(rest) = upper.strip_prefix("DROP SHUTTLE") {
+        let rest = rest.strip_prefix(" IF EXISTS").unwrap_or(rest);
+        return extract_name(rest, trimmed, "DROP SHUTTLE").map(Dispatch::DropShuttle);
+    }
+    if let Some(rest) = upper.strip_prefix("DROP CONNECTION") {
+        let rest = rest.strip_prefix(" IF EXISTS").unwrap_or(rest);
+        return extract_name(rest, trimmed, "DROP CONNECTION").map(Dispatch::DropConnection);
+    }
+    None
+}
+
+/// Extract the (single) identifier following a keyword. `upper_rest`
+/// is the uppercased remainder; `original` is the original-cased SQL
+/// so the returned name preserves the user's casing. `keyword_len`
+/// is the byte length of the leading keyword pair so we can index
+/// `original` correctly.
+fn extract_name(upper_rest: &str, original: &str, keyword: &str) -> Option<String> {
+    // Find where the identifier starts in the original (case-preserving)
+    // SQL by re-skipping the keyword + the same number of leading
+    // whitespace chars `upper_rest` was trimmed to.
+    let start = original.len() - upper_rest.trim_start().len();
+    let after_kw = &original[start..];
+    let name = after_kw
+        .split(|c: char| c.is_whitespace() || c == ';' || c == ',' || c == '(')
+        .next()?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let _ = keyword;
+    Some(name.to_string())
+}
+
+/// Strip SQL line comments (`-- foo`) but leave string-literal
+/// `--` alone (none in our templates, but the right thing to do).
+/// Block comments aren't used by playground templates.
+fn strip_sql_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    for line in sql.lines() {
+        let trimmed = match line.find("--") {
+            Some(idx) => &line[..idx],
+            None => line,
+        };
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out
+}
+
+fn first_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +356,72 @@ mod tests {
         let t = ApiCallError::Transport("net dead".into());
         assert!(t.body_snippet().is_none());
         assert!(t.http_status().is_none());
+    }
+
+    #[test]
+    fn classify_create_connection() {
+        let sql = "CREATE CONNECTION IF NOT EXISTS my_pg TYPE POSTGRES WITH (host = 'h');";
+        assert!(matches!(
+            classify_statement(sql),
+            Some(Dispatch::CreateConnection)
+        ));
+    }
+
+    #[test]
+    fn classify_create_shuttle_multiline_with_comments() {
+        let sql = "-- preamble\nCREATE SHUTTLE IF NOT EXISTS s SOURCE c TABLES ('t');";
+        assert!(matches!(
+            classify_statement(sql),
+            Some(Dispatch::CreateShuttle)
+        ));
+    }
+
+    #[test]
+    fn classify_resume_shuttle_name() {
+        let sql = "RESUME SHUTTLE my_shuttle_42;";
+        match classify_statement(sql) {
+            Some(Dispatch::ResumeShuttle(name)) => assert_eq!(name, "my_shuttle_42"),
+            other => panic!("expected ResumeShuttle, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn classify_drop_shuttle_if_exists() {
+        let sql = "DROP SHUTTLE IF EXISTS old_pipe;";
+        match classify_statement(sql) {
+            Some(Dispatch::DropShuttle(name)) => assert_eq!(name, "old_pipe"),
+            other => panic!("expected DropShuttle, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn classify_pause_shuttle() {
+        match classify_statement("PAUSE SHUTTLE foo") {
+            Some(Dispatch::PauseShuttle(name)) => assert_eq!(name, "foo"),
+            other => panic!("expected PauseShuttle, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn classify_drop_connection() {
+        match classify_statement("DROP CONNECTION IF EXISTS conn1;") {
+            Some(Dispatch::DropConnection(name)) => assert_eq!(name, "conn1"),
+            other => panic!("expected DropConnection, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn classify_unsupported_returns_none() {
+        assert!(classify_statement("SELECT 1").is_none());
+        assert!(classify_statement("INSERT INTO t VALUES (1)").is_none());
+    }
+
+    #[test]
+    fn strip_sql_comments_drops_line_comments() {
+        let sql = "-- comment\nSELECT 1; -- inline\n";
+        let out = strip_sql_comments(sql);
+        assert!(!out.contains("comment"));
+        assert!(!out.contains("inline"));
+        assert!(out.contains("SELECT 1;"));
     }
 }
