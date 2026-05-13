@@ -23,9 +23,20 @@ CREATE CONNECTION IF NOT EXISTS {connection}
     password = '{source_password}'
   );
 
+-- TABLES entries are single-quoted "schema.table" so the connector's
+-- OOP wrapper doesn't fall back to its trait-default schema ("public"
+-- — same fallback that bit postgres-cdc-ecommerce pre-fix). The
+-- parser stores these literally; `ShuttleRecord::from_create`
+-- splits on the first dot via `splitn(2, '.')` so the connector
+-- gets {schema, table} pairs that resolve in our session DB.
 CREATE SHUTTLE IF NOT EXISTS {shuttle}
   SOURCE {connection}
-  TABLES (devices, readings, alerts, device_configs)
+  TABLES (
+    '{namespace}.devices',
+    '{namespace}.readings',
+    '{namespace}.alerts',
+    '{namespace}.device_configs'
+  )
   TARGET warehouse.{namespace}
   SCHEDULE CONTINUOUS
   WITH (

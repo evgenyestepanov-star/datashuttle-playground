@@ -735,8 +735,8 @@
     {
       "id": "mysql-binlog-restart",
       "source_id": "mysql",
-      "title": "MySQL — binlog recovery after outage",
-      "description": "Stop MySQL for 30 seconds, generate writes to buffer, restart — shuttle resumes from last checkpoint.",
+      "title": "MySQL — binlog recovery after pause",
+      "description": "Pause the shuttle for 30s, write rows into MySQL that buffer in the binlog, then resume — shuttle catches up from its last checkpoint.",
       "difficulty": "intermediate",
       "tier": 2,
       "status": "beta",
@@ -748,7 +748,8 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "full"
@@ -759,18 +760,38 @@
       "estimated_duration_s": 240,
       "actions": [
         {
-          "id": "stop-mysql",
-          "label": "Stop MySQL (30s)",
-          "kind": "shell",
+          "id": "pause-shuttle",
+          "label": "Pause shuttle (simulate outage)",
+          "kind": "http",
           "target": "ops",
-          "shell_cmd": "docker compose -f examples/docker-compose.yml stop mysql && sleep 30 && docker compose -f examples/docker-compose.yml start mysql"
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/shuttles/{shuttle}/pause"
+          }
+        },
+        {
+          "id": "buffer-writes",
+          "label": "Write rows during pause",
+          "kind": "sql",
+          "target": "source",
+          "sql": "INSERT INTO readings (device_id, metric_type, value, unit, quality, recorded_at) SELECT CONCAT('DEV-', LPAD(n, 4, '0')), 'temperature', 22.5 + (n * 0.1), '°C', 100, NOW() FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5) t;"
+        },
+        {
+          "id": "resume-shuttle",
+          "label": "Resume shuttle (catch up from binlog)",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "POST",
+            "url": "/api/v1/shuttles/{shuttle}/resume"
+          }
         },
         {
           "id": "catchup-load",
-          "label": "Verify catch-up",
+          "label": "Verify catch-up with sentinel write",
           "kind": "sql",
           "target": "source",
-          "sql_file": "mysql-cdc/actions/catchup.sql"
+          "sql_file": "playground/mysql-cdc/actions/catchup.sql"
         }
       ],
       "expected_outcomes": [
