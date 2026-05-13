@@ -1035,14 +1035,20 @@ async fn produce_kafka(
         .output()
         .await
         .map_err(|e| format!("spawn rpk: {e}"))?;
-    // rpk exits non-zero only on hard errors; "already exists" returns
-    // 0 with a stderr note. Treat any non-zero with stderr containing
-    // ALREADY_EXISTS as success.
+    // rpk exits non-zero AND prints `TOPIC_ALREADY_EXISTS` to STDOUT
+    // (not stderr) when the topic exists — verified empirically against
+    // v24.2.7. So we have to check both streams. Treat the
+    // already-exists case as success; only fail on genuine errors.
     if !create.status.success() {
         let stderr = String::from_utf8_lossy(&create.stderr);
-        if !stderr.contains("TOPIC_ALREADY_EXISTS") && !stderr.contains("already exists") {
+        let stdout = String::from_utf8_lossy(&create.stdout);
+        let already = stderr.contains("TOPIC_ALREADY_EXISTS")
+            || stderr.contains("already exists")
+            || stdout.contains("TOPIC_ALREADY_EXISTS")
+            || stdout.contains("already exists");
+        if !already {
             return Err(format!(
-                "rpk topic create {topic} (broker={broker}): {stderr}"
+                "rpk topic create {topic} (broker={broker}): stdout={stdout} stderr={stderr}"
             ));
         }
     }
