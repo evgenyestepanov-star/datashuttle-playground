@@ -455,13 +455,14 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "clickhouse"
         ]
       },
-      "init_sql": "clickhouse-snapshot/init.sql",
+      "init_sql": "playground/clickhouse-snapshot/init.sql",
       "shuttle_sql": "playground/clickhouse-snapshot/shuttle.sql",
       "estimated_duration_s": 300,
       "actions": [
@@ -470,7 +471,7 @@
           "label": "Load 100k events",
           "kind": "sql",
           "target": "source",
-          "sql_file": "clickhouse-snapshot/actions/load-100k.sql"
+          "sql_file": "playground/clickhouse-snapshot/actions/load-100k.sql"
         },
         {
           "id": "cluster-by-user",
@@ -478,12 +479,24 @@
           "kind": "http",
           "target": "ops",
           "http_request": {
-            "method": "PATCH",
+            "method": "PUT",
             "url": "/api/v1/shuttles/{shuttle}/clustering",
             "body": {
-              "columns": [
-                "user_id"
-              ]
+              "tables": {
+                "": {
+                  "sort_order": {
+                    "fields": [
+                      {
+                        "column": "user_id",
+                        "transform": "Identity",
+                        "direction": "Asc",
+                        "null_order": null
+                      }
+                    ]
+                  }
+                }
+              },
+              "apply_to_existing_tables": false
             }
           }
         },
@@ -493,13 +506,30 @@
           "kind": "http",
           "target": "ops",
           "http_request": {
-            "method": "PATCH",
+            "method": "PUT",
             "url": "/api/v1/shuttles/{shuttle}/clustering",
             "body": {
-              "columns": [
-                "session_id",
-                "event_time"
-              ]
+              "tables": {
+                "": {
+                  "sort_order": {
+                    "fields": [
+                      {
+                        "column": "session_id",
+                        "transform": "Identity",
+                        "direction": "Asc",
+                        "null_order": null
+                      },
+                      {
+                        "column": "event_time",
+                        "transform": "Identity",
+                        "direction": "Asc",
+                        "null_order": null
+                      }
+                    ]
+                  }
+                }
+              },
+              "apply_to_existing_tables": false
             }
           }
         }

@@ -49,6 +49,16 @@ use tokio::sync::OnceCell;
 pub struct TcpPlaygroundDispatcher {
     pg: OnceCell<sqlx::PgPool>,
     mysql: OnceCell<mysql_async::Pool>,
+    clickhouse: OnceCell<ClickhouseConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct ClickhouseConfig {
+    base_url: String,
+    user: String,
+    password: String,
+    default_db: String,
+    client: reqwest::Client,
 }
 
 impl TcpPlaygroundDispatcher {
@@ -112,6 +122,103 @@ impl TcpPlaygroundDispatcher {
         drop(conn);
         Ok((format!("OK ({rows} rows)"), String::new()))
     }
+
+    async fn exec_clickhouse_inner(
+        &self,
+        db: Option<&str>,
+        sql: &str,
+    ) -> Result<(String, String), DispatchError> {
+        let cfg = self
+            .clickhouse
+            .get_or_try_init(build_clickhouse_config)
+            .await?;
+        // ClickHouse 24.x forbids multi-statement HTTP bodies by default
+        // ("Multi-statements are not allowed"). Both the `?multiquery=1`
+        // URL param and the `multi_statements` setting got renamed or
+        // restricted across versions — the portable fix is to split the
+        // body on `;` and POST each statement separately. Init scripts /
+        // action SQL files routinely have 5–20 statements so the round-trip
+        // cost is fine for a playground workload.
+        // `db` arrived through `is_safe_resource_name` and `default_db`
+        // is sourced from env — both are restricted to ASCII alnum + `_`,
+        // which are URL-safe so no escaping needed.
+        let target_db = db.unwrap_or(cfg.default_db.as_str());
+        let url = format!(
+            "{}/?max_execution_time={}&database={}",
+            cfg.base_url, STATEMENT_TIMEOUT_SECS, target_db
+        );
+        let mut last_body = String::new();
+        let mut stmt_count = 0usize;
+        for stmt in split_clickhouse_statements(sql) {
+            stmt_count += 1;
+            let resp = cfg
+                .client
+                .post(&url)
+                .basic_auth(&cfg.user, Some(&cfg.password))
+                .body(stmt.clone())
+                .send()
+                .await
+                .map_err(map_reqwest_error)?;
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(map_clickhouse_status(status, body));
+            }
+            last_body = body;
+        }
+        if stmt_count == 0 {
+            return Ok((String::new(), String::new()));
+        }
+        Ok((last_body, String::new()))
+    }
+}
+
+/// Split a SQL body on top-level `;` boundaries while honouring `'…'`
+/// and `"…"` string literals and `--` line comments. ClickHouse seed
+/// files use `'…'` extensively for arrayElement string lists — naive
+/// `split(';')` would split inside those.
+fn split_clickhouse_statements(sql: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        // Skip `-- ...` line comments outside quotes.
+        if !in_single && !in_double && c == '-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                current.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                current.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(c);
+            }
+            ';' if !in_single && !in_double => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    out.push(trimmed);
+                }
+                current.clear();
+            }
+            other => current.push(other),
+        }
+        i += 1;
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        out.push(trimmed);
+    }
+    out
 }
 
 #[async_trait]
@@ -294,6 +401,62 @@ impl PlaygroundDispatcher for TcpPlaygroundDispatcher {
         Ok(rows)
     }
 
+    async fn exec_clickhouse(&self, sql: &str) -> Result<(String, String), DispatchError> {
+        self.exec_clickhouse_inner(None, sql).await
+    }
+
+    async fn exec_clickhouse_in_database(
+        &self,
+        db: &str,
+        sql: &str,
+    ) -> Result<(String, String), DispatchError> {
+        if !is_safe_resource_name(db) {
+            return Err(DispatchError::Config(format!(
+                "unsafe clickhouse database name: {db}"
+            )));
+        }
+        self.exec_clickhouse_inner(Some(db), sql).await
+    }
+
+    async fn ping_clickhouse(&self) -> Result<(), DispatchError> {
+        let _ = self.exec_clickhouse("SELECT 1").await?;
+        Ok(())
+    }
+
+    async fn provision_clickhouse_database(&self, name: &str) -> Result<(), DispatchError> {
+        if !is_safe_resource_name(name) {
+            return Err(DispatchError::Config(format!(
+                "unsafe clickhouse database name: {name}"
+            )));
+        }
+        let ddl = format!("CREATE DATABASE IF NOT EXISTS `{name}`");
+        self.exec_clickhouse(&ddl).await.map(|_| ())
+    }
+
+    async fn teardown_clickhouse_database(&self, name: &str) -> Result<(), DispatchError> {
+        if !is_safe_resource_name(name) {
+            return Err(DispatchError::Config(format!(
+                "unsafe clickhouse database name: {name}"
+            )));
+        }
+        let ddl = format!("DROP DATABASE IF EXISTS `{name}`");
+        self.exec_clickhouse(&ddl).await.map(|_| ())
+    }
+
+    async fn list_clickhouse_playground_databases(&self) -> Result<Vec<String>, DispatchError> {
+        let (body, _) = self
+            .exec_clickhouse(
+                "SELECT name FROM system.databases \
+                 WHERE name LIKE 'playground\\_%' FORMAT TabSeparated",
+            )
+            .await?;
+        Ok(body
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect())
+    }
+
     fn is_tcp_backed(&self) -> bool {
         true
     }
@@ -326,6 +489,31 @@ async fn build_pg_pool() -> Result<sqlx::PgPool, DispatchError> {
         .connect(&url)
         .await
         .map_err(map_pg_error)
+}
+
+async fn build_clickhouse_config() -> Result<ClickhouseConfig, DispatchError> {
+    let host = env_or("DS_CLICKHOUSE_PLAYGROUND_HOST", "clickhouse-playground");
+    let port = env_u16("DS_CLICKHOUSE_PLAYGROUND_PORT", 8123)?;
+    let user = env_or("DS_CLICKHOUSE_PLAYGROUND_USER", "playground");
+    let default_db = env_or("DS_CLICKHOUSE_PLAYGROUND_DB", "playground");
+    let password = load_secret(
+        "DS_CLICKHOUSE_PLAYGROUND_PASSWORD",
+        "/run/secrets/clickhouse_playground_password",
+    )?;
+    let base_url = format!("http://{host}:{port}");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(POOL_ACQUIRE_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(STATEMENT_TIMEOUT_SECS + 5))
+        .pool_max_idle_per_host(POOL_MAX_CONNECTIONS as usize)
+        .build()
+        .map_err(|e| DispatchError::Config(format!("reqwest builder: {e}")))?;
+    Ok(ClickhouseConfig {
+        base_url,
+        user,
+        password,
+        default_db,
+        client,
+    })
 }
 
 async fn build_mysql_pool() -> Result<mysql_async::Pool, DispatchError> {
@@ -419,6 +607,51 @@ fn map_pg_error(e: sqlx::Error) -> DispatchError {
         E::PoolTimedOut => DispatchError::Timeout(POOL_ACQUIRE_TIMEOUT_SECS),
         E::PoolClosed => DispatchError::Connect("pool closed".into()),
         other => DispatchError::Protocol(other.to_string()),
+    }
+}
+
+fn map_reqwest_error(e: reqwest::Error) -> DispatchError {
+    if e.is_timeout() {
+        DispatchError::Timeout(STATEMENT_TIMEOUT_SECS)
+    } else if e.is_connect() {
+        DispatchError::Connect(e.to_string())
+    } else {
+        DispatchError::Protocol(e.to_string())
+    }
+}
+
+/// Map a non-2xx clickhouse HTTP response to a [`DispatchError`].
+/// ClickHouse returns the error code as a `X-ClickHouse-Exception-Code`
+/// header but the response body also leads with `Code: NNN. DB::Exception:`
+/// — we parse the body since reqwest already gives it back to us.
+fn map_clickhouse_status(status: reqwest::StatusCode, body: String) -> DispatchError {
+    // Examples:
+    //   Code: 60. DB::Exception: Table x doesn't exist.
+    //   Code: 81. DB::Exception: Database y doesn't exist.
+    //   Code: 62. DB::Exception: Syntax error.
+    let code = body
+        .strip_prefix("Code: ")
+        .and_then(|s| s.split('.').next())
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let msg = body
+        .lines()
+        .next()
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| status.to_string());
+    match code {
+        Some(60) | Some(81) | Some(47) => DispatchError::SchemaMismatch(msg),
+        Some(62) | Some(63) => DispatchError::Protocol(format!("syntax: {msg}")),
+        Some(159) => DispatchError::Timeout(STATEMENT_TIMEOUT_SECS),
+        Some(516) | Some(192) => DispatchError::Auth(msg),
+        _ => {
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                DispatchError::Auth(msg)
+            } else {
+                DispatchError::Protocol(format!("[{}] {msg}", status.as_u16()))
+            }
+        }
     }
 }
 

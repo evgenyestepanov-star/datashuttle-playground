@@ -335,8 +335,12 @@ pub async fn create_session(
                 .await;
         } else if matches!(
             source.docker_service.as_deref(),
-            Some("postgres" | "mysql")
+            Some("postgres" | "mysql" | "clickhouse")
         ) {
+            let resource_label = match source.docker_service.as_deref() {
+                Some("postgres") => "schema",
+                _ => "database",
+            };
             let _ = mgr
                 .update(session.id, &identity.user_id, |s| {
                     s.record(
@@ -344,11 +348,7 @@ pub async fn create_session(
                         format!(
                             "{} {}={}",
                             source.docker_service.as_deref().unwrap_or("?"),
-                            if source.docker_service.as_deref() == Some("postgres") {
-                                "schema"
-                            } else {
-                                "database"
-                            },
+                            resource_label,
                             s.namespace,
                         ),
                         None,
@@ -1201,6 +1201,13 @@ async fn provision_session_resources(
             state.dispatcher.provision_mysql_database(namespace).await,
             format!("CREATE DATABASE IF NOT EXISTS `{namespace}`;"),
         ),
+        Some("clickhouse") => (
+            state
+                .dispatcher
+                .provision_clickhouse_database(namespace)
+                .await,
+            format!("CREATE DATABASE IF NOT EXISTS `{namespace}`;"),
+        ),
         _ => return Ok(()),
     };
     match tcp_result {
@@ -1263,6 +1270,21 @@ async fn dispatch_source_sql(
                 Err(other) => return Err(other.to_string()),
             }
         }
+        "clickhouse" | "clickhouse-playground" => {
+            let result = if use_isolation {
+                state
+                    .dispatcher
+                    .exec_clickhouse_in_database(namespace, sql)
+                    .await
+            } else {
+                state.dispatcher.exec_clickhouse(sql).await
+            };
+            match result {
+                Ok(out) => return Ok(out),
+                Err(DispatchError::Unavailable) => {}
+                Err(other) => return Err(other.to_string()),
+            }
+        }
         _ => {}
     }
     // Shell fallback. Inject schema/db isolation so init.sql and
@@ -1276,6 +1298,11 @@ async fn dispatch_source_sql(
                  {sql}"
             )),
             "mysql" | "mysql-playground" => Some(format!(
+                "CREATE DATABASE IF NOT EXISTS `{namespace}`;\n\
+                 USE `{namespace}`;\n\
+                 {sql}"
+            )),
+            "clickhouse" | "clickhouse-playground" => Some(format!(
                 "CREATE DATABASE IF NOT EXISTS `{namespace}`;\n\
                  USE `{namespace}`;\n\
                  {sql}"
@@ -1499,6 +1526,24 @@ fn build_source_coords_registry() -> SourceCoordsRegistry {
             default_db: "",
             default_user: "",
             default_pw: "",
+        },
+    );
+    // ClickHouse playground sidecar — HTTP interface on 8123 used by
+    // both the playground dispatcher (this binary) and the cloud
+    // shuttle's clickhouse connector. The init.sql / shuttle.sql
+    // templates only touch `{source_host}` + `{source_port}` plus
+    // `{source_user}` / `{source_password}` so they can authenticate;
+    // `{source_db}` defaults to the per-session isolated database
+    // overridden by the substitute_session_db hook below.
+    entries.insert(
+        "clickhouse",
+        SourceCoordsSpec {
+            env_prefix: "DS_CLICKHOUSE_PLAYGROUND",
+            default_host: "clickhouse-playground",
+            default_port: "8123",
+            default_db: "playground",
+            default_user: "playground",
+            default_pw: "playground",
         },
     );
     SourceCoordsRegistry { entries }
@@ -1867,6 +1912,18 @@ async fn teardown_session(
                 warn!(
                     namespace = %namespace,
                     "teardown mysql database failed: {e}"
+                );
+            }
+        }
+        if let Err(e) = state
+            .dispatcher
+            .teardown_clickhouse_database(namespace)
+            .await
+        {
+            if !matches!(e, DispatchError::Unavailable) {
+                warn!(
+                    namespace = %namespace,
+                    "teardown clickhouse database failed: {e}"
                 );
             }
         }

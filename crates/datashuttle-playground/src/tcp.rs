@@ -142,6 +142,45 @@ pub trait PlaygroundDispatcher: Send + Sync + std::fmt::Debug {
 
     async fn list_mysql_playground_databases(&self) -> Result<Vec<String>, DispatchError>;
 
+    /// Execute SQL against the clickhouse playground sidecar over HTTP
+    /// (default port 8123). ClickHouse is multi-statement-aware via the
+    /// `query` URL param, so the dispatcher submits the entire body as
+    /// one POST.
+    async fn exec_clickhouse(&self, sql: &str) -> Result<(String, String), DispatchError> {
+        let _ = sql;
+        Err(DispatchError::Unavailable)
+    }
+
+    /// Database-scoped clickhouse execute — prepends `USE <db>;` so
+    /// unqualified table refs resolve in the session's private DB.
+    async fn exec_clickhouse_in_database(
+        &self,
+        db: &str,
+        sql: &str,
+    ) -> Result<(String, String), DispatchError> {
+        let _ = (db, sql);
+        Err(DispatchError::Unavailable)
+    }
+
+    async fn ping_clickhouse(&self) -> Result<(), DispatchError> {
+        Err(DispatchError::Unavailable)
+    }
+
+    /// Create an isolated clickhouse database for a playground session.
+    async fn provision_clickhouse_database(&self, name: &str) -> Result<(), DispatchError> {
+        let _ = name;
+        Err(DispatchError::Unavailable)
+    }
+
+    async fn teardown_clickhouse_database(&self, name: &str) -> Result<(), DispatchError> {
+        let _ = name;
+        Err(DispatchError::Unavailable)
+    }
+
+    async fn list_clickhouse_playground_databases(&self) -> Result<Vec<String>, DispatchError> {
+        Err(DispatchError::Unavailable)
+    }
+
     /// True iff the impl is the cloud-backed TCP dispatcher. Handlers
     /// use this to refuse shell-exec fallbacks in cloud deployments
     /// (Phase 10.B.6 invariant): the cloud build MUST NOT reach a
