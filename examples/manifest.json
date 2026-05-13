@@ -1162,8 +1162,8 @@
     {
       "id": "large-payload",
       "source_id": "mysql",
-      "title": "Large payload — 50MB BLOB",
-      "description": "Replicate a table with BLOB columns up to 50MB each. Verify streaming and memory stability.",
+      "title": "Large payload — 1MB BLOB",
+      "description": "Replicate a table with BLOB columns up to 1MB each via mysql RANDOM_BYTES(). Verify streaming and memory stability on the cloud TCP dispatcher (max_allowed_packet default = 4MB).",
       "difficulty": "advanced",
       "tier": 4,
       "status": "beta",
@@ -1175,7 +1175,8 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "full",
@@ -1188,11 +1189,18 @@
       "estimated_duration_s": 300,
       "actions": [
         {
-          "id": "insert-50mb",
-          "label": "Insert 50MB blob",
-          "kind": "shell",
+          "id": "insert-1mb",
+          "label": "Insert 1MB blob",
+          "kind": "sql",
           "target": "source",
-          "shell_cmd": "bash examples/playground/large-payload/actions/insert-50mb.sh"
+          "sql": "INSERT INTO blobs (name, payload) VALUES (CONCAT('blob-', UNIX_TIMESTAMP(), '-', FLOOR(RAND() * 1000000)), REPEAT(MD5(RAND()), 32768));"
+        },
+        {
+          "id": "burst-3x1mb",
+          "label": "Burst 3 × 1MB blobs",
+          "kind": "sql",
+          "target": "source",
+          "sql": "INSERT INTO blobs (name, payload) SELECT CONCAT('burst-', UNIX_TIMESTAMP(), '-', n), REPEAT(MD5(CONCAT(RAND(), n)), 32768) FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3) t;"
         }
       ],
       "expected_outcomes": []
