@@ -1546,6 +1546,21 @@ fn build_source_coords_registry() -> SourceCoordsRegistry {
             default_pw: "playground",
         },
     );
+    // WireMock — fake REST API backing the rest-api-polling scenario.
+    // The shuttle.sql template uses `{source_host}` + `{source_port}` to
+    // build `base_url`; user/password/db are unused but the placeholder
+    // substituter expects them so we hand back empty strings.
+    entries.insert(
+        "wiremock",
+        SourceCoordsSpec {
+            env_prefix: "DS_WIREMOCK_PLAYGROUND",
+            default_host: "wiremock-playground",
+            default_port: "8080",
+            default_db: "",
+            default_user: "",
+            default_pw: "",
+        },
+    );
     SourceCoordsRegistry { entries }
 }
 

@@ -930,7 +930,7 @@
       "id": "rest-api-polling",
       "source_id": "wiremock-rest",
       "title": "REST API polling (WireMock)",
-      "description": "Poll a WireMock endpoint every 5s. Fake API returns 100 deterministic users per page.",
+      "description": "Poll a WireMock endpoint every 5s. Fake API returns 5 deterministic users.",
       "difficulty": "beginner",
       "tier": 3,
       "status": "beta",
@@ -941,24 +941,24 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "playground"
         ]
       },
-      "init_sql": "playground/rest-api/init.sql",
       "shuttle_sql": "playground/rest-api/shuttle.sql",
       "estimated_duration_s": 180,
       "actions": [
         {
-          "id": "trigger-poll",
-          "label": "Trigger poll now",
+          "id": "shuttle-status",
+          "label": "Check polling progress",
           "kind": "http",
           "target": "ops",
           "http_request": {
-            "method": "POST",
-            "url": "/api/v1/shuttles/{shuttle}/poll"
+            "method": "GET",
+            "url": "/api/v1/shuttles/{shuttle}/status"
           }
         },
         {
@@ -968,7 +968,7 @@
           "target": "rest",
           "http_request": {
             "method": "POST",
-            "url": "http://wiremock:8080/__admin/mappings/reset"
+            "url": "http://wiremock-playground:8080/__admin/mappings/reset"
           }
         }
       ],
