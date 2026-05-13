@@ -545,8 +545,8 @@
     {
       "id": "clickhouse-time-travel",
       "source_id": "clickhouse",
-      "title": "Iceberg time travel — query at timestamp / rollback",
-      "description": "Run SELECTs at historical timestamps and roll back to earlier snapshots to recover from a bad write.",
+      "title": "Iceberg time travel — snapshot history + table metadata",
+      "description": "Inspect the Iceberg target's snapshot history before and after a bad write, then read the metadata document to walk the parent_id chain. Demonstrates time-travel READ paths over existing /catalog endpoints (full rollback writes are a separate api surface).",
       "difficulty": "advanced",
       "tier": 1,
       "status": "stable",
@@ -558,24 +558,25 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "clickhouse"
         ]
       },
-      "init_sql": "clickhouse-snapshot/init.sql",
+      "init_sql": "playground/clickhouse-snapshot/init.sql",
       "shuttle_sql": "playground/clickhouse-snapshot/shuttle.sql",
       "estimated_duration_s": 240,
       "actions": [
         {
-          "id": "take-snapshot-1",
-          "label": "Snapshot 1 (baseline)",
+          "id": "snapshots-baseline",
+          "label": "List snapshots — baseline",
           "kind": "http",
           "target": "ops",
           "http_request": {
-            "method": "POST",
-            "url": "/api/v1/shuttles/{shuttle}/commit"
+            "method": "GET",
+            "url": "/api/v1/catalog/tables/{namespace}/events/snapshots"
           }
         },
         {
@@ -583,32 +584,26 @@
           "label": "Simulate bad write",
           "kind": "sql",
           "target": "source",
-          "sql_file": "clickhouse-snapshot/actions/bad-write.sql"
+          "sql_file": "playground/clickhouse-snapshot/actions/bad-write.sql"
         },
         {
-          "id": "query-at-t1",
-          "label": "Query at T1",
+          "id": "snapshots-after",
+          "label": "List snapshots — after bad write",
           "kind": "http",
           "target": "ops",
           "http_request": {
-            "method": "POST",
-            "url": "/api/v1/sql",
-            "body": {
-              "sql": "SELECT count(*) FROM warehouse.analytics FOR SYSTEM_TIME AS OF '{t1}'"
-            }
+            "method": "GET",
+            "url": "/api/v1/catalog/tables/{namespace}/events/snapshots"
           }
         },
         {
-          "id": "rollback",
-          "label": "Rollback to T1",
+          "id": "table-metadata",
+          "label": "Inspect metadata (parent_id chain)",
           "kind": "http",
           "target": "ops",
           "http_request": {
-            "method": "POST",
-            "url": "/api/v1/shuttles/{shuttle}/rollback",
-            "body": {
-              "snapshot_id": "{snapshot_1}"
-            }
+            "method": "GET",
+            "url": "/api/v1/catalog/tables/{namespace}/events/metadata"
           }
         }
       ],
