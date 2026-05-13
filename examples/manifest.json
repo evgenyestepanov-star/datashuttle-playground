@@ -413,13 +413,13 @@
       "estimated_duration_s": 300,
       "actions": [
         {
-          "id": "start-backfill",
-          "label": "Start snapshot",
+          "id": "shuttle-status",
+          "label": "Check snapshot progress",
           "kind": "http",
           "target": "ops",
           "http_request": {
-            "method": "POST",
-            "url": "/api/v1/shuttles/{shuttle}/backfill"
+            "method": "GET",
+            "url": "/api/v1/shuttles/{shuttle}/status"
           }
         },
         {
@@ -663,7 +663,10 @@
           "target": "ops",
           "http_request": {
             "method": "POST",
-            "url": "/api/v1/deadletters/{shuttle}/replay"
+            "url": "/api/v1/deadletters/{shuttle}/replay",
+            "body": {
+              "ids": []
+            }
           }
         }
       ],
@@ -908,7 +911,10 @@
           "target": "ops",
           "http_request": {
             "method": "POST",
-            "url": "/api/v1/deadletters/{shuttle}/replay"
+            "url": "/api/v1/deadletters/{shuttle}/replay",
+            "body": {
+              "ids": []
+            }
           }
         }
       ],
