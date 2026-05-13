@@ -100,6 +100,17 @@ async fn main() -> anyhow::Result<()> {
         api_client,
     });
 
+    // Reap TTL-expired sessions every 60s. Without this an expired
+    // session sits in memory until the user (or admin) explicitly
+    // ends it, and its catalog namespace + parquet files accumulate
+    // in the warehouse forever. The interval is deliberately shorter
+    // than the default session TTL so a session that expires at
+    // T can be cleaned up by T+60s.
+    datashuttle_playground_server::handlers::spawn_session_reaper(
+        Arc::clone(&state),
+        std::time::Duration::from_secs(60),
+    );
+
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr())

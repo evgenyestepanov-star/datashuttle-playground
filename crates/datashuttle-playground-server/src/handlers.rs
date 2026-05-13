@@ -1792,6 +1792,19 @@ async fn teardown_session(
                 "teardown DROP NAMESPACE failed: {e}",
             );
         }
+        // Polaris' purgeRequested doesn't actually wipe S3 objects in
+        // our setup (catalog drops the table reference but leaves
+        // parquet + manifest blobs behind). Purge the namespace
+        // prefix directly via mc so the warehouse doesn't accumulate
+        // orphan data files. Same belt-and-suspenders pattern for
+        // the file-ingestion bucket (upload-file scenarios). Best-
+        // effort: log + continue, never fail the teardown.
+        if let Err(e) = purge_s3_namespace(namespace).await {
+            warn!(
+                namespace = %namespace,
+                "teardown S3 purge failed: {e}",
+            );
+        }
     } else {
         warn!(
             namespace = %namespace,
@@ -1862,6 +1875,102 @@ async fn teardown_session(
     state
         .metrics
         .observe_teardown(TeardownKind::Session, td_start.elapsed());
+}
+
+/// Shell out to `mc` and remove every object whose key starts with
+/// `<namespace>/` in the warehouse + file-ingestion buckets. Called
+/// from `teardown_session` because Polaris' `purgeRequested=true`
+/// only drops catalog entries, not the S3 blobs underneath.
+async fn purge_s3_namespace(namespace: &str) -> Result<(), String> {
+    let endpoint =
+        std::env::var("DS_MINIO_ENDPOINT").unwrap_or_else(|_| "http://minio:9000".into());
+    let access = std::env::var("DS_MINIO_ACCESS_KEY")
+        .or_else(|_| std::env::var("MINIO_ROOT_USER"))
+        .map_err(|_| "missing DS_MINIO_ACCESS_KEY / MINIO_ROOT_USER".to_string())?;
+    let secret = std::env::var("DS_MINIO_SECRET_KEY")
+        .or_else(|_| std::env::var("MINIO_ROOT_PASSWORD"))
+        .map_err(|_| "missing DS_MINIO_SECRET_KEY / MINIO_ROOT_PASSWORD".to_string())?;
+    // The warehouse bucket name is the host portion of DS_WAREHOUSE
+    // (e.g. `s3://warehouse/` → `warehouse`). Default matches the
+    // cloud-local compose.
+    let warehouse_bucket = std::env::var("DS_WAREHOUSE")
+        .ok()
+        .and_then(|s| {
+            s.strip_prefix("s3://")
+                .map(|rest| rest.trim_end_matches('/').split('/').next().unwrap_or("").to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "warehouse".into());
+
+    let cmd = format!(
+        "mc alias set local {endpoint} {access} {secret} >/dev/null && \
+         mc rm --recursive --force local/{wh}/{ns}/ >/dev/null 2>&1 || true; \
+         mc rm --recursive --force local/file-ingestion/{ns}/ >/dev/null 2>&1 || true",
+        endpoint = shell_quote(&endpoint),
+        access = shell_quote(&access),
+        secret = shell_quote(&secret),
+        wh = shell_quote(&warehouse_bucket),
+        ns = shell_quote(namespace),
+    );
+    let output = tokio::process::Command::new("bash")
+        .arg("-c")
+        .arg(&cmd)
+        .output()
+        .await
+        .map_err(|e| format!("spawn mc: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "mc rm exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// Periodically reap TTL-expired sessions. Each expired session goes
+/// through `teardown_session` so its catalog namespace, parquet
+/// files, source-side schema, and api connection all land in the
+/// same cleanup path as an explicit DELETE — without it a TTL
+/// expiration left the catalog full of orphan namespaces.
+///
+/// Spawned from `main`. Returns once the receiver is dropped, but
+/// in practice the task runs for the lifetime of the server.
+pub fn spawn_session_reaper(state: Arc<ServerState>, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // First tick fires immediately — skip it so the server has a
+        // moment to settle before we start touching the catalog.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let Some(mgr) = state.sessions.as_ref() else {
+                continue;
+            };
+            let expired = mgr.sweep_expired().await;
+            if expired.is_empty() {
+                continue;
+            }
+            info!(count = expired.len(), "reaping expired playground sessions");
+            for session in expired {
+                let identity = Identity {
+                    user_id: session.user_id.clone(),
+                    tenant_id: None,
+                    actor_id: None,
+                    auth_method: "ttl-reaper".into(),
+                };
+                teardown_session(
+                    state.as_ref(),
+                    &identity,
+                    &session.shuttle_name,
+                    &session.connection_name,
+                    &session.namespace,
+                )
+                .await;
+            }
+        }
+    });
 }
 
 /// Is this string safe to splice into a DataShuttle SQL DDL identifier
