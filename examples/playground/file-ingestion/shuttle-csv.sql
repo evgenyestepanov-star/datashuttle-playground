@@ -8,13 +8,20 @@
 -- TYPE FILE is the registered connector name — `TYPE S3` is the
 -- URI scheme used in PATH, not a connector type.
 
+-- `format` lives on the CONNECTION rather than the SHUTTLE WITH clause
+-- because run_loop_chunks/setup.rs only propagates connection.options
+-- into the connector's `properties` map. Shuttle WITH options stay on
+-- record.options and don't reach the file connector's config (only
+-- `source_path` → `base_uri` is special-cased). Putting `format` here
+-- keeps the file sidecar's FileConfig getting the right value.
 CREATE CONNECTION IF NOT EXISTS playground_files_s3
   TYPE FILE
   PROPERTIES (
-    endpoint = 'http://minio:9000',
+    endpoint = '{minio_endpoint}',
     region = 'us-east-1',
-    access_key = 'minioadmin',
-    secret_key = 'minioadmin'
+    access_key = '{minio_access_key}',
+    secret_key = '{minio_secret_key}',
+    format = 'csv'
   );
 
 -- S3 file-ingestion is poll-based — the file connector polls the
@@ -26,11 +33,9 @@ CREATE CONNECTION IF NOT EXISTS playground_files_s3
 -- would filter out every real path. The format=csv filter on
 -- extension is sufficient to pick up only CSV files.
 --
--- NOTE: the file connector errors at create-time if the prefix has
--- no matching files (schema can't be inferred). Sessions are
--- expected to upload at least one CSV before the snapshot poll
--- runs. Until then the shuttle sits in `error` state and recovers
--- on the next poll cycle once a file lands.
+-- The file connector's get_schema polls the prefix for up to 60s
+-- waiting for the first matching file, so it's fine to create the
+-- session first and have the user click upload-csv afterwards.
 CREATE SHUTTLE IF NOT EXISTS {shuttle}
   SOURCE playground_files_s3 PATH 's3://file-ingestion/{namespace}/'
   TARGET warehouse.{namespace}

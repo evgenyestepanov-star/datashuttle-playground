@@ -1526,11 +1526,26 @@ fn deployment_str(d: Deployment) -> &'static str {
 }
 
 fn substitute_placeholders(s: &str, session: &Session) -> String {
+    // S3 / MinIO substitutions for file scenarios. Cloud deployments
+    // pass real credentials via DS_MINIO_*; standalone demos default
+    // to `minioadmin` / `minioadmin`.
+    let minio_endpoint = std::env::var("DS_MINIO_ENDPOINT")
+        .unwrap_or_else(|_| "http://minio:9000".into());
+    let minio_access = std::env::var("DS_MINIO_ACCESS_KEY")
+        .or_else(|_| std::env::var("MINIO_ROOT_USER"))
+        .unwrap_or_else(|_| "minioadmin".into());
+    let minio_secret = std::env::var("DS_MINIO_SECRET_KEY")
+        .or_else(|_| std::env::var("MINIO_ROOT_PASSWORD"))
+        .unwrap_or_else(|_| "minioadmin".into());
+
     let out = s
         .replace("{shuttle}", &session.shuttle_name)
         .replace("{namespace}", &session.namespace)
         .replace("{connection}", &session.connection_name)
-        .replace("{session}", &session.id.to_string());
+        .replace("{session}", &session.id.to_string())
+        .replace("{minio_endpoint}", &minio_endpoint)
+        .replace("{minio_access_key}", &minio_access)
+        .replace("{minio_secret_key}", &minio_secret);
     if let Some(unresolved) = detect_unresolved_placeholder(&out) {
         tracing::warn!(
             session_id = %session.id,
