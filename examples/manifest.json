@@ -1119,7 +1119,8 @@
       "prerequisites": {
         "deployment": [
           "dev",
-          "self-managed"
+          "self-managed",
+          "cloud"
         ],
         "profiles": [
           "playground",
