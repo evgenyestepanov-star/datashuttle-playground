@@ -12,22 +12,30 @@ RUN cargo build --release --bin datashuttle-playground-server
 RUN strip target/release/datashuttle-playground-server || true
 
 FROM debian:bookworm-slim
-# `rpk` is bundled so produce_kafka can create the per-session topic
-# before the first produce — Pandaproxy's REST produce endpoint does
-# NOT auto-create topics (returns UNKNOWN_TOPIC_OR_PARTITION on first
-# call), and Redpanda's admin API has no topic-CRUD route either.
-# `unzip` is build-only.
+# Two third-party CLIs are bundled into the runtime image:
+#
+# * `rpk` — produce_kafka shells out to it for idempotent topic create
+#   before the first POST to Pandaproxy. Pandaproxy's REST produce does
+#   NOT auto-create topics (returns UNKNOWN_TOPIC_OR_PARTITION on first
+#   call) and Redpanda's admin API has no topic-CRUD route either.
+#
+# * `mc` (MinIO client) — upload_file shells out to it to copy
+#   scenario payloads into the cloud stack's MinIO. Direct sigv4 PUT
+#   from reqwest would mean pulling in aws-sdk-s3 which adds minutes
+#   to the playground build; `mc` is a single static binary.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tini curl unzip \
     && ARCH="$(dpkg --print-architecture)" \
     && case "$ARCH" in \
-         amd64) RPK_ARCH=amd64 ;; \
-         arm64) RPK_ARCH=arm64 ;; \
+         amd64) RPK_ARCH=amd64; MC_ARCH=amd64 ;; \
+         arm64) RPK_ARCH=arm64; MC_ARCH=arm64 ;; \
          *) echo "unsupported arch $ARCH"; exit 1 ;; \
        esac \
     && curl -fsSL "https://github.com/redpanda-data/redpanda/releases/download/v24.2.7/rpk-linux-${RPK_ARCH}.zip" -o /tmp/rpk.zip \
     && unzip -q /tmp/rpk.zip -d /usr/local/bin \
     && rm /tmp/rpk.zip \
+    && curl -fsSL "https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc" -o /usr/local/bin/mc \
+    && chmod +x /usr/local/bin/mc \
     && apt-get purge -y --auto-remove unzip \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system playground \

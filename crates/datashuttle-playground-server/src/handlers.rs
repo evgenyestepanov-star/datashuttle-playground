@@ -1123,13 +1123,44 @@ async fn produce_kafka(
 async fn upload_file(payload_file: &str, session: &Session) -> Result<(String, String), String> {
     validate_example_relative_path(payload_file)?;
     let bucket = s3_bucket_for(session);
-    let cmd = format!(
-        "docker compose -f /opt/datashuttle/examples/docker-compose.yml exec -T minio-init \
-         mc cp /data/{payload_file} local/{bucket}/",
-        payload_file = shell_quote(payload_file),
-        bucket = shell_quote(&bucket)
+
+    let endpoint = std::env::var("DS_MINIO_ENDPOINT").unwrap_or_else(|_| "http://minio:9000".into());
+    let access = std::env::var("DS_MINIO_ACCESS_KEY")
+        .or_else(|_| std::env::var("MINIO_ROOT_USER"))
+        .map_err(|_| "missing DS_MINIO_ACCESS_KEY / MINIO_ROOT_USER".to_string())?;
+    let secret = std::env::var("DS_MINIO_SECRET_KEY")
+        .or_else(|_| std::env::var("MINIO_ROOT_PASSWORD"))
+        .map_err(|_| "missing DS_MINIO_SECRET_KEY / MINIO_ROOT_PASSWORD".to_string())?;
+
+    // Source path under the baked examples tree.
+    let src_path = std::path::Path::new("/opt/datashuttle/examples").join(payload_file);
+    if !src_path.exists() {
+        return Err(format!(
+            "payload not found in baked examples: {}",
+            src_path.display()
+        ));
+    }
+
+    // mc alias set is idempotent and writes to ~/.mc/. The playground
+    // user has $HOME=/var/lib/playground so this stays out of /root.
+    let alias_cmd = format!(
+        "mc alias set local {endpoint} {access} {secret} >/dev/null && \
+         mc mb --ignore-existing local/{bucket} >/dev/null && \
+         mc cp {src} local/{bucket}/{payload_basename}",
+        endpoint = shell_quote(&endpoint),
+        access = shell_quote(&access),
+        secret = shell_quote(&secret),
+        bucket = shell_quote(&bucket),
+        src = shell_quote(&src_path.to_string_lossy()),
+        payload_basename = shell_quote(
+            std::path::Path::new(payload_file)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| payload_file.to_string())
+                .as_str()
+        ),
     );
-    run_shell(&cmd, session).await
+    run_shell(&alias_cmd, session).await
 }
 
 /// Create the per-session source resource (postgres schema or mysql
