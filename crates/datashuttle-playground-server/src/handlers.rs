@@ -1007,14 +1007,19 @@ async fn produce_kafka(
     let repeat = (repeat.min(100_000)) as usize;
     let topic = kafka_topic_for(session);
 
+    // DS_KAFKA_PLAYGROUND_PORT in cloud deployments now points at the
+    // native Kafka API (9092) because the connector binary speaks
+    // librdkafka directly. produce_kafka itself still uses Pandaproxy
+    // REST (HTTP) — the port for that is hardcoded to 8082 unless
+    // overridden via DS_KAFKA_PLAYGROUND_REST_PORT.
     let host =
         std::env::var("DS_KAFKA_PLAYGROUND_HOST").unwrap_or_else(|_| "redpanda-playground".into());
-    let port = std::env::var("DS_KAFKA_PLAYGROUND_PORT").unwrap_or_else(|_| "8082".into());
-    // Kafka native port is conventionally 9092 — Pandaproxy doesn't
-    // expose it via env. Keep it pinned; if a deployment ever moves it,
-    // override via DS_KAFKA_PLAYGROUND_BROKER.
-    let broker = std::env::var("DS_KAFKA_PLAYGROUND_BROKER")
-        .unwrap_or_else(|_| format!("{host}:9092"));
+    let port = std::env::var("DS_KAFKA_PLAYGROUND_REST_PORT").unwrap_or_else(|_| "8082".into());
+    let broker = std::env::var("DS_KAFKA_PLAYGROUND_BROKER").unwrap_or_else(|_| {
+        let native = std::env::var("DS_KAFKA_PLAYGROUND_PORT")
+            .unwrap_or_else(|_| "9092".into());
+        format!("{host}:{native}")
+    });
 
     // Ensure the topic exists. Pandaproxy's REST produce does NOT
     // auto-create — first POST returns UNKNOWN_TOPIC_OR_PARTITION
