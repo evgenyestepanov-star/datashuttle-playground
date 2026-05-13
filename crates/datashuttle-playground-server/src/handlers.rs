@@ -1152,16 +1152,22 @@ async fn upload_file(payload_file: &str, session: &Session) -> Result<(String, S
         ));
     }
 
+    // Per-session prefix so concurrent sessions don't see each
+    // other's files. The shuttle template's PATH points at
+    // `s3://{bucket}/{namespace}/`.
+    let prefix = &session.namespace;
+
     // mc alias set is idempotent and writes to ~/.mc/. The playground
     // user has $HOME=/var/lib/playground so this stays out of /root.
     let alias_cmd = format!(
         "mc alias set local {endpoint} {access} {secret} >/dev/null && \
          mc mb --ignore-existing local/{bucket} >/dev/null && \
-         mc cp {src} local/{bucket}/{payload_basename}",
+         mc cp {src} local/{bucket}/{prefix}/{payload_basename}",
         endpoint = shell_quote(&endpoint),
         access = shell_quote(&access),
         secret = shell_quote(&secret),
         bucket = shell_quote(&bucket),
+        prefix = shell_quote(prefix),
         src = shell_quote(&src_path.to_string_lossy()),
         payload_basename = shell_quote(
             std::path::Path::new(payload_file)
