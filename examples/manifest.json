@@ -721,7 +721,7 @@
           "full"
         ]
       },
-      "init_sql": "mysql-cdc/init.sql",
+      "init_sql": "playground/mysql-cdc/init.sql",
       "shuttle_sql": "playground/mysql-cdc/shuttle.sql",
       "estimated_duration_s": 240,
       "actions": [

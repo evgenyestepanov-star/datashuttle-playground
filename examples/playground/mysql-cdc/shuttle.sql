@@ -9,6 +9,10 @@
 -- isolated at the database level — matches what `exec_mysql_in_database`
 -- provisions on cloud and what the shell-fallback's prepended
 -- `CREATE DATABASE IF NOT EXISTS <ns>; USE <ns>;` creates locally.
+-- `server_id` is intentionally not set — the connector's default
+-- (9000001) is fine for single-session local-dev. Cloud deployments
+-- with concurrent sessions need a per-session numeric server_id; the
+-- playground server should derive one from the namespace (TODO).
 CREATE CONNECTION IF NOT EXISTS {connection}
   TYPE MYSQL
   PROPERTIES (
@@ -16,8 +20,7 @@ CREATE CONNECTION IF NOT EXISTS {connection}
     port = '{source_port}',
     database = '{namespace}',
     username = '{source_user}',
-    password = '{source_password}',
-    server_id = '{shuttle}'
+    password = '{source_password}'
   );
 
 CREATE SHUTTLE IF NOT EXISTS {shuttle}
