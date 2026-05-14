@@ -74,23 +74,29 @@ network the public can reach.
 | `GET`  | `/api/v1/playground/health`       | Authenticated liveness check |
 
 The full session-lifecycle surface (`POST /sessions`, `POST
-/sessions/:id/actions/:action_id`, etc.) currently lives inside DataShuttle
-api-core and depends on private types. Phase 5.B of the architecture
-simplification plan introduces a public extension point in OSS so those
-handlers can be ported into this binary without pulling in private
-internals. Track Phase 5.B in the OSS `SIMPLIFICATION_PLAN.md`.
+/sessions/:id/actions/:action_id`, etc.) is served by this binary; OSS
+api reverse-proxies `/api/v1/playground/*` to a
+`datashuttle-playground-server` instance via the `playground.url` config
+key (Phase 5.B, OSS PR #1049) and forwards
+`Authorization: Bearer <PLAYGROUND_TOKEN>`. The corresponding cloud-side
+work (drop the in-tree playground module, refresh OSS pin) shipped as
+Phase 5.C in `datashuttle-cloud`.
 
-## Integrating with DataShuttle api
+### Cloud-eligible scenarios
 
-When Phase 5.B lands, DataShuttle's api will reverse-proxy
-`/api/v1/playground/*` to a `datashuttle-playground-server` instance and
-forward `Authorization: Bearer <PLAYGROUND_TOKEN>`. Until then api-core
-serves the playground surface in-process; running this binary today is
-useful for:
+A growing set of scenarios is approved for managed-Cloud sessions
+(others stay self-hosted only because they need privileged sidecars):
 
-* Validating the standalone binary builds and runs.
-* Exercising the manifest-load path.
-* Setting up infrastructure (Helm, image registry) ahead of the cutover.
+* `large-payload` (1 MB blob via MySQL)
+* `slow-consumer`
+* `rest-api-polling`
+* `clickhouse-high-cardinality`
+* `clickhouse-time-travel` (read-only flow)
+* `mysql-binlog-restart`
+* `redis-streams-events`
+
+Each release also runs the TTL session reaper + S3 purge in playground
+teardown.
 
 ## Releases
 
