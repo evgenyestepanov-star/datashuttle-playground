@@ -1236,6 +1236,53 @@
       "expected_outcomes": []
     },
     {
+      "id": "redis-streams-cdc",
+      "source_id": "redis",
+      "title": "Redis Streams CDC — continuous tail",
+      "description": "Continuous XREADGROUP loop materializes new stream entries into Iceberg within seconds. Action XADDs 200 events, shuttle picks them up on its next BLOCK return.",
+      "difficulty": "intermediate",
+      "tier": 2,
+      "status": "beta",
+      "tags": [
+        "redis",
+        "streams",
+        "cdc"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed",
+          "cloud"
+        ],
+        "profiles": [
+          "playground"
+        ]
+      },
+      "init_sql": "playground/redis-streams-cdc/init.sql",
+      "shuttle_sql": "playground/redis-streams-cdc/shuttle.sql",
+      "estimated_duration_s": 180,
+      "actions": [
+        {
+          "id": "produce-burst",
+          "label": "XADD 200 events",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "playground/redis-streams-cdc/actions/produce-burst.sql"
+        },
+        {
+          "id": "shuttle-status",
+          "label": "Check shuttle status",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "GET",
+            "url": "/api/v1/shuttles/{shuttle}/status"
+          }
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
       "id": "redis-streams-events",
       "source_id": "redis",
       "title": "Redis Streams → Iceberg",
