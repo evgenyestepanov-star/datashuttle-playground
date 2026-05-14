@@ -51,6 +51,7 @@ fn test_state() -> Arc<ServerState> {
         api_timeout: Duration::from_secs(5),
         deployment_kind: "dev".into(),
         examples_dir: workspace_examples_dir(),
+        data_dir: std::env::temp_dir().join("playground-smoke"),
     };
 
     let prom_registry = Arc::new(Registry::new());

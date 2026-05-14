@@ -38,6 +38,12 @@ pub struct Config {
     /// container image layout. Override via
     /// `PLAYGROUND_EXAMPLES_DIR`.
     pub examples_dir: PathBuf,
+    /// Writable state dir for the playground. `SessionManager`
+    /// mirrors the session map into `<data_dir>/playground/sessions.json`
+    /// so the TTL reaper can finish teardown of any session that
+    /// survived a container restart instead of orphaning its
+    /// shuttle/connection/namespace. Override via `PLAYGROUND_DATA_DIR`.
+    pub data_dir: PathBuf,
 }
 
 impl Config {
@@ -51,6 +57,7 @@ const DEFAULT_TTL_SECS: u64 = 2 * 60 * 60;
 const DEFAULT_QUOTA: u32 = 20;
 const DEFAULT_DEPLOYMENT_KIND: &str = "cloud";
 const DEFAULT_EXAMPLES_DIR: &str = "/opt/datashuttle/examples";
+const DEFAULT_DATA_DIR: &str = "/var/lib/datashuttle-playground";
 
 pub fn load() -> anyhow::Result<Config> {
     let bind_addr =
@@ -101,6 +108,12 @@ pub fn load() -> anyhow::Result<Config> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_EXAMPLES_DIR));
 
+    let data_dir = std::env::var("PLAYGROUND_DATA_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+
     Ok(Config {
         bind_addr,
         manifest_path,
@@ -112,5 +125,6 @@ pub fn load() -> anyhow::Result<Config> {
         api_timeout,
         deployment_kind,
         examples_dir,
+        data_dir,
     })
 }

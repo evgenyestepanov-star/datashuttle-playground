@@ -39,7 +39,8 @@ RUN apt-get update \
     && apt-get purge -y --auto-remove unzip \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system playground \
-    && useradd --system --gid playground --create-home --home-dir /var/lib/playground playground
+    && useradd --system --gid playground --create-home --home-dir /var/lib/playground playground \
+    && install -d -o playground -g playground /var/lib/datashuttle-playground
 WORKDIR /opt/datashuttle
 COPY --from=builder /build/target/release/datashuttle-playground-server /usr/local/bin/datashuttle-playground-server
 COPY examples /opt/datashuttle/examples

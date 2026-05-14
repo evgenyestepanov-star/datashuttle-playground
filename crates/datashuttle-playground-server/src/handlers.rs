@@ -2045,6 +2045,146 @@ pub fn spawn_session_reaper(state: Arc<ServerState>, interval: std::time::Durati
     });
 }
 
+/// One-shot orphan sweep against the api registry. Finds shuttles whose
+/// target namespace looks playground-owned (`warehouse.playground_*`)
+/// but isn't referenced by any live session in the hydrated session
+/// map, and tears them down through the standard cleanup path.
+///
+/// Necessary because the api-side registry (Pg) outlives the playground
+/// container — shuttles, connections, Iceberg namespaces, parquet, and
+/// per-session schemas in postgres/mysql/clickhouse all persist a
+/// playground restart. With persistence enabled
+/// (`SessionManager::new_with_persistence`) the TTL reaper alone covers
+/// the live-restart case, but artifacts created BEFORE persistence was
+/// turned on, or sessions whose `sessions.json` was deleted, still
+/// orphan. This sweep is the catch-up pass that catches both.
+///
+/// Identity used for the cleanup calls is a synthesized
+/// `playground-orphan-sweeper` user — orphan artifacts have
+/// `owner=null, tenant_id=null` so any service-token-authenticated
+/// caller can drop them.
+pub async fn sweep_api_orphans(state: Arc<ServerState>) {
+    let Some(api) = state.api_client.as_ref() else {
+        info!("orphan sweep skipped — api callback client not configured");
+        return;
+    };
+    let Some(mgr) = state.sessions.as_ref() else {
+        return;
+    };
+
+    let live_shuttles = mgr.live_shuttles().await;
+    let live_namespaces = mgr.live_namespaces().await;
+
+    let identity = Identity {
+        user_id: "playground-orphan-sweeper".into(),
+        tenant_id: None,
+        actor_id: None,
+        auth_method: "orphan-sweeper".into(),
+    };
+
+    let shuttles = match api
+        .request("GET", "/api/v1/shuttles", None, &identity)
+        .await
+    {
+        Ok((_, v)) => v.as_array().cloned().unwrap_or_default(),
+        Err(e) => {
+            warn!(error = %e, "orphan sweep: GET /api/v1/shuttles failed");
+            return;
+        }
+    };
+
+    let mut swept = 0usize;
+    for s in &shuttles {
+        let Some(name) = s.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(target) = s.get("target").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let conn = s.get("connection").and_then(|v| v.as_str()).unwrap_or("");
+        // target = "warehouse.playground_<hex>_<hex>" — strip warehouse
+        // prefix to get the namespace identifier.
+        let Some((_, ns)) = target.split_once('.') else {
+            continue;
+        };
+        if !ns.starts_with("playground_") {
+            continue;
+        }
+        if live_shuttles.contains(name) {
+            continue;
+        }
+        if live_namespaces.contains(ns) {
+            continue;
+        }
+
+        warn!(
+            shuttle = %name,
+            connection = %conn,
+            namespace = %ns,
+            "playground orphan sweep: tearing down stale api artifacts"
+        );
+        teardown_session(state.as_ref(), &identity, name, conn, ns).await;
+        swept += 1;
+    }
+
+    // Drop any leftover playground connection whose backing shuttles
+    // were already dropped (e.g. partial-teardown carry-over from
+    // pre-persistence days). teardown_session above also drops the
+    // connection paired with each shuttle, but the api lets a
+    // connection outlive its shuttles, so we close that gap.
+    let connections = match api
+        .request("GET", "/api/v1/connections", None, &identity)
+        .await
+    {
+        Ok((_, v)) => v.as_array().cloned().unwrap_or_default(),
+        Err(e) => {
+            warn!(error = %e, "orphan sweep: GET /api/v1/connections failed");
+            return;
+        }
+    };
+    let mut conn_swept = 0usize;
+    for c in &connections {
+        let Some(name) = c.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Playground connections follow the pg_<hex>_<hex>_src naming
+        // contract (see substitute_placeholders).
+        if !name.starts_with("pg_") || !name.ends_with("_src") {
+            continue;
+        }
+        // Skip connections still referenced by a live shuttle.
+        let still_used = live_shuttles.iter().any(|s| {
+            // The shuttle's connection follows the same prefix so we
+            // can cheaply test by string-equality.
+            shuttles.iter().any(|sv| {
+                sv.get("name").and_then(|v| v.as_str()) == Some(s.as_str())
+                    && sv.get("connection").and_then(|v| v.as_str()) == Some(name)
+            })
+        });
+        if still_used {
+            continue;
+        }
+        if let Err(e) = api
+            .exec_sql(&identity, &format!("DROP CONNECTION IF EXISTS {name}"))
+            .await
+        {
+            warn!(connection = %name, "orphan sweep: DROP CONNECTION failed: {e}");
+        } else {
+            conn_swept += 1;
+        }
+    }
+
+    if swept > 0 || conn_swept > 0 {
+        info!(
+            shuttles = swept,
+            connections = conn_swept,
+            "playground orphan sweep complete"
+        );
+    } else {
+        info!("playground orphan sweep: nothing to clean");
+    }
+}
+
 /// Is this string safe to splice into a DataShuttle SQL DDL identifier
 /// position? Accept only the character set produced by `derive_namespace`
 /// so any drift in name derivation that introduces punctuation fails

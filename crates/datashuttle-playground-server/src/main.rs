@@ -48,9 +48,25 @@ async fn main() -> anyhow::Result<()> {
 
     let manifest = load_manifest(cfg.manifest_path.as_deref())?.map(Arc::new);
 
-    let sessions = manifest
-        .as_ref()
-        .map(|m| SessionManager::new(m.clone(), true, cfg.session_ttl));
+    // Persist session map to <data_dir>/playground/sessions.json so the
+    // TTL reaper survives a playground container restart. Without this
+    // the in-memory map starts empty after boot and the api-side
+    // artifacts those sessions created (shuttles, connections, Iceberg
+    // namespaces, source-side schemas) orphan permanently — only an
+    // explicit DELETE /sessions/:id from a live client cleans them.
+    let sessions = if let Some(m) = manifest.as_ref() {
+        Some(
+            SessionManager::new_with_persistence(
+                m.clone(),
+                true,
+                cfg.session_ttl,
+                &cfg.data_dir,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
 
     let quota = Arc::new(PlaygroundQuotaTracker::with_limit(
         cfg.session_quota_per_day,
@@ -110,6 +126,15 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&state),
         std::time::Duration::from_secs(60),
     );
+
+    // One-shot orphan sweep against the api registry — catches any
+    // shuttles/connections/namespaces left over from sessions that
+    // existed before persistence was enabled OR whose sessions.json
+    // was deleted (volume rebuild, etc.). Spawned in background so
+    // server start isn't gated on the api being reachable yet.
+    tokio::spawn(datashuttle_playground_server::handlers::sweep_api_orphans(
+        Arc::clone(&state),
+    ));
 
     let app = router(state);
 
