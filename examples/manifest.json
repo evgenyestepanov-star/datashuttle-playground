@@ -161,6 +161,20 @@
         "docker",
         "profile=chaos"
       ]
+    },
+    {
+      "id": "redis",
+      "name": "Redis Streams",
+      "kind": "streaming",
+      "status": "beta",
+      "free": true,
+      "docker_service": "redis",
+      "docker_profile": "playground",
+      "image": "redis:7-alpine",
+      "prerequisites": [
+        "docker",
+        "profile=playground"
+      ]
     }
   ],
   "scenarios": [
@@ -1217,6 +1231,53 @@
           "kind": "sql",
           "target": "source",
           "sql": "INSERT INTO blobs (name, payload) SELECT CONCAT('burst-', UNIX_TIMESTAMP(), '-', n), REPEAT(MD5(CONCAT(RAND(), n)), 32768) FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3) t;"
+        }
+      ],
+      "expected_outcomes": []
+    },
+    {
+      "id": "redis-streams-events",
+      "source_id": "redis",
+      "title": "Redis Streams → Iceberg",
+      "description": "Seed 500 entries on a Redis stream via XADD, materialize them to Iceberg through the snapshot-only Redis connector, then append 200 more on demand.",
+      "difficulty": "beginner",
+      "tier": 2,
+      "status": "beta",
+      "tags": [
+        "redis",
+        "streams",
+        "snapshot"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed",
+          "cloud"
+        ],
+        "profiles": [
+          "playground"
+        ]
+      },
+      "init_sql": "playground/redis-streams-events/init.sql",
+      "shuttle_sql": "playground/redis-streams-events/shuttle.sql",
+      "estimated_duration_s": 120,
+      "actions": [
+        {
+          "id": "xadd-more",
+          "label": "XADD 200 more events",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "playground/redis-streams-events/actions/xadd-more.sql"
+        },
+        {
+          "id": "shuttle-status",
+          "label": "Check shuttle status",
+          "kind": "http",
+          "target": "ops",
+          "http_request": {
+            "method": "GET",
+            "url": "/api/v1/shuttles/{shuttle}/status"
+          }
         }
       ],
       "expected_outcomes": []

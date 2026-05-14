@@ -38,6 +38,10 @@ async-trait.workspace = true
 futures.workspace = true
 sqlx.workspace = true
 mysql_async.workspace = true
+# Redis playground dispatcher — XADD/XLEN/DEL for the redis-streams-events
+# scenario. `tokio-comp` is the async runtime adapter; `aio` enables
+# `MultiplexedConnection` so concurrent sessions share one pool.
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "aio", "streams"] }
 
 # Phase 5.C — session handlers: identity middleware, HTTP callbacks
 # to OSS api, source-SQL shell dispatch, deterministic UUIDs.

@@ -335,10 +335,11 @@ pub async fn create_session(
                 .await;
         } else if matches!(
             source.docker_service.as_deref(),
-            Some("postgres" | "mysql" | "clickhouse")
+            Some("postgres" | "mysql" | "clickhouse" | "redis")
         ) {
             let resource_label = match source.docker_service.as_deref() {
                 Some("postgres") => "schema",
+                Some("redis") => "key-prefix",
                 _ => "database",
             };
             let _ = mgr
@@ -1285,6 +1286,31 @@ async fn dispatch_source_sql(
                 Err(other) => return Err(other.to_string()),
             }
         }
+        "redis" | "redis-playground" => {
+            // Redis has no SQL; the playground scenario authors a
+            // newline-delimited script of Redis commands. Per-session
+            // isolation is a key prefix (Redis logical DBs cap at 16,
+            // too few for many concurrent sessions).
+            let result = if use_isolation {
+                state
+                    .dispatcher
+                    .exec_redis_in_namespace(namespace, sql)
+                    .await
+            } else {
+                state.dispatcher.exec_redis(sql).await
+            };
+            match result {
+                Ok(out) => return Ok(out),
+                Err(DispatchError::Unavailable) => {
+                    return Err(
+                        "redis dispatcher unavailable — cloud playground requires \
+                         DS_REDIS_PLAYGROUND_HOST + redis-playground sidecar"
+                            .into(),
+                    )
+                }
+                Err(other) => return Err(other.to_string()),
+            }
+        }
         _ => {}
     }
     // Shell fallback. Inject schema/db isolation so init.sql and
@@ -1544,6 +1570,22 @@ fn build_source_coords_registry() -> SourceCoordsRegistry {
             default_db: "playground",
             default_user: "playground",
             default_pw: "playground",
+        },
+    );
+    // Redis playground sidecar — host:port for the redis-streams-events
+    // scenario. The shuttle.sql template stashes the connection coords in
+    // `host`/`port` properties; the connector itself reads them from the
+    // JSON-schema config. No user/password (redis defaults to auth-less
+    // inside the playground network); `db` index defaults to 0.
+    entries.insert(
+        "redis",
+        SourceCoordsSpec {
+            env_prefix: "DS_REDIS_PLAYGROUND",
+            default_host: "redis-playground",
+            default_port: "6379",
+            default_db: "0",
+            default_user: "",
+            default_pw: "",
         },
     );
     // WireMock — fake REST API backing the rest-api-polling scenario.
@@ -1939,6 +1981,18 @@ async fn teardown_session(
                 warn!(
                     namespace = %namespace,
                     "teardown clickhouse database failed: {e}"
+                );
+            }
+        }
+        if let Err(e) = state
+            .dispatcher
+            .teardown_redis_namespace(namespace)
+            .await
+        {
+            if !matches!(e, DispatchError::Unavailable) {
+                warn!(
+                    namespace = %namespace,
+                    "teardown redis namespace failed: {e}"
                 );
             }
         }

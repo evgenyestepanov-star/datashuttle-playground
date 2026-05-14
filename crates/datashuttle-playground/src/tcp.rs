@@ -181,6 +181,45 @@ pub trait PlaygroundDispatcher: Send + Sync + std::fmt::Debug {
         Err(DispatchError::Unavailable)
     }
 
+    /// Execute one or more Redis commands against the redis playground
+    /// sidecar. Scripts are newline-delimited; each line is whitespace-
+    /// split into an argv vector (a poor man's RESP — fine for the
+    /// playground because every command we ship is hand-authored and
+    /// single-line). The dispatcher executes them in-order on a single
+    /// connection so MULTI/EXEC bracketing (if needed later) round-trips
+    /// correctly. Returns the concatenated text rendering of every
+    /// response — playground UI only needs a "did it work" flag.
+    async fn exec_redis(&self, script: &str) -> Result<(String, String), DispatchError> {
+        let _ = script;
+        Err(DispatchError::Unavailable)
+    }
+
+    /// Database-scoped redis execute. Per-session isolation in Redis is
+    /// implemented as a key-prefix rather than a logical DB (Redis caps
+    /// at 16 logical dbs by default, way too few for many concurrent
+    /// playground sessions). Implementations should rewrite each
+    /// `<KEY>` token in `script` to `<namespace>:<KEY>` before exec.
+    async fn exec_redis_in_namespace(
+        &self,
+        namespace: &str,
+        script: &str,
+    ) -> Result<(String, String), DispatchError> {
+        let _ = (namespace, script);
+        Err(DispatchError::Unavailable)
+    }
+
+    async fn ping_redis(&self) -> Result<(), DispatchError> {
+        Err(DispatchError::Unavailable)
+    }
+
+    /// Wipe every key prefixed with `<namespace>:` from the redis
+    /// playground. Called from `teardown_session` after the shuttle
+    /// stops so per-session data doesn't accumulate.
+    async fn teardown_redis_namespace(&self, namespace: &str) -> Result<(), DispatchError> {
+        let _ = namespace;
+        Err(DispatchError::Unavailable)
+    }
+
     /// True iff the impl is the cloud-backed TCP dispatcher. Handlers
     /// use this to refuse shell-exec fallbacks in cloud deployments
     /// (Phase 10.B.6 invariant): the cloud build MUST NOT reach a

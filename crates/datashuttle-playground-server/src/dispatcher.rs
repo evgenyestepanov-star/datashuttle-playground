@@ -50,6 +50,7 @@ pub struct TcpPlaygroundDispatcher {
     pg: OnceCell<sqlx::PgPool>,
     mysql: OnceCell<mysql_async::Pool>,
     clickhouse: OnceCell<ClickhouseConfig>,
+    redis: OnceCell<RedisConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +60,17 @@ struct ClickhouseConfig {
     password: String,
     default_db: String,
     client: reqwest::Client,
+}
+
+/// Cached redis playground client. `MultiplexedConnection` shares one
+/// underlying TCP socket across concurrent users — we mint per-exec
+/// clones via `clone()` rather than holding a Mutex.
+#[derive(Debug, Clone)]
+struct RedisConfig {
+    /// AUTH password. Empty = no AUTH.
+    password: String,
+    /// Cached client. Held by Arc so clones are cheap.
+    client: std::sync::Arc<redis::Client>,
 }
 
 impl TcpPlaygroundDispatcher {
@@ -171,6 +183,86 @@ impl TcpPlaygroundDispatcher {
         }
         Ok((last_body, String::new()))
     }
+
+    /// Execute a Redis command script. One command per non-blank,
+    /// non-`#`-prefixed line; whitespace-split into argv. Per-session
+    /// key isolation is the scenario author's responsibility — bake
+    /// `{namespace}` into every key reference in your script and the
+    /// handler's placeholder substitution resolves it before we see
+    /// the body. No magic prefixing here so EVAL/Lua and MULTI/EXEC
+    /// behave intuitively.
+    async fn exec_redis_inner(
+        &self,
+        namespace: Option<&str>,
+        script: &str,
+    ) -> Result<(String, String), DispatchError> {
+        // `namespace` is informational only — kept on the signature so
+        // future commands that legitimately need to know the session
+        // boundary (XINFO listing, namespace teardown sweep) can read
+        // it without a trait churn. Today it's just an attribution
+        // hint we log.
+        let _ = namespace;
+        let cfg = self.redis.get_or_try_init(build_redis_config).await?;
+        let mut conn = cfg
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(map_redis_error)?;
+        if !cfg.password.is_empty() {
+            let _: redis::RedisResult<()> = redis::cmd("AUTH")
+                .arg(&cfg.password)
+                .query_async(&mut conn)
+                .await;
+        }
+        let mut count = 0usize;
+        let mut last_reply = String::new();
+        for raw in script.lines() {
+            let line = raw.split('#').next().unwrap_or(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            let tokens = tokenize_redis_line(line);
+            if tokens.is_empty() {
+                continue;
+            }
+            let mut cmd = redis::cmd(&tokens[0]);
+            for tok in tokens.iter().skip(1) {
+                cmd.arg(tok.as_str());
+            }
+            let reply: redis::Value =
+                cmd.query_async(&mut conn).await.map_err(map_redis_error)?;
+            count += 1;
+            last_reply = format!("{reply:?}");
+        }
+        Ok((format!("OK ({count} commands)\n{last_reply}"), String::new()))
+    }
+}
+
+/// Cheap shell-style tokenizer for Redis scripts. Honours single + double
+/// quotes so `XADD events * type "purchase order" amount 1.50` keeps
+/// the spaced value intact. Anything fancier (escapes, nested quotes)
+/// is out of scope — playground scripts are authored by us.
+fn tokenize_redis_line(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for c in line.chars() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ws if ws.is_whitespace() && !in_single && !in_double => {
+                if !buf.is_empty() {
+                    out.push(std::mem::take(&mut buf));
+                }
+            }
+            other => buf.push(other),
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
 }
 
 /// Split a SQL body on top-level `;` boundaries while honouring `'…'`
@@ -457,6 +549,79 @@ impl PlaygroundDispatcher for TcpPlaygroundDispatcher {
             .collect())
     }
 
+    async fn exec_redis(&self, script: &str) -> Result<(String, String), DispatchError> {
+        self.exec_redis_inner(None, script).await
+    }
+
+    async fn exec_redis_in_namespace(
+        &self,
+        namespace: &str,
+        script: &str,
+    ) -> Result<(String, String), DispatchError> {
+        if !is_safe_resource_name(namespace) {
+            return Err(DispatchError::Config(format!(
+                "unsafe redis namespace: {namespace}"
+            )));
+        }
+        self.exec_redis_inner(Some(namespace), script).await
+    }
+
+    async fn ping_redis(&self) -> Result<(), DispatchError> {
+        let cfg = self.redis.get_or_try_init(build_redis_config).await?;
+        let mut conn = cfg
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(map_redis_error)?;
+        let _: String = redis::cmd("PING")
+            .query_async(&mut conn)
+            .await
+            .map_err(map_redis_error)?;
+        Ok(())
+    }
+
+    async fn teardown_redis_namespace(&self, namespace: &str) -> Result<(), DispatchError> {
+        if !is_safe_resource_name(namespace) {
+            return Err(DispatchError::Config(format!(
+                "unsafe redis namespace: {namespace}"
+            )));
+        }
+        let cfg = self.redis.get_or_try_init(build_redis_config).await?;
+        let mut conn = cfg
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(map_redis_error)?;
+        // SCAN through the prefix and DEL in chunks of 100. Avoids
+        // KEYS which would block the server for many keys, and avoids
+        // FLUSHDB which would wipe other sessions.
+        let pattern = format!("{namespace}:*");
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(200)
+                .query_async(&mut conn)
+                .await
+                .map_err(map_redis_error)?;
+            if !keys.is_empty() {
+                let _: i64 = redis::cmd("DEL")
+                    .arg(&keys)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(map_redis_error)?;
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(())
+    }
+
     fn is_tcp_backed(&self) -> bool {
         true
     }
@@ -513,6 +678,28 @@ async fn build_clickhouse_config() -> Result<ClickhouseConfig, DispatchError> {
         password,
         default_db,
         client,
+    })
+}
+
+async fn build_redis_config() -> Result<RedisConfig, DispatchError> {
+    let host = env_or("DS_REDIS_PLAYGROUND_HOST", "redis-playground");
+    let port = env_u16("DS_REDIS_PLAYGROUND_PORT", 6379)?;
+    let db = env_u16("DS_REDIS_PLAYGROUND_DB", 0)?;
+    // Redis playground is optional + auth-less by default; tolerate
+    // missing secret file + env.
+    let password = match load_secret(
+        "DS_REDIS_PLAYGROUND_PASSWORD",
+        "/run/secrets/redis_playground_password",
+    ) {
+        Ok(p) => p,
+        Err(_) => String::new(),
+    };
+    let url = format!("redis://{host}:{port}/{db}");
+    let client = redis::Client::open(url)
+        .map_err(|e| DispatchError::Config(format!("redis client: {e}")))?;
+    Ok(RedisConfig {
+        password,
+        client: std::sync::Arc::new(client),
     })
 }
 
@@ -652,6 +839,18 @@ fn map_clickhouse_status(status: reqwest::StatusCode, body: String) -> DispatchE
                 DispatchError::Protocol(format!("[{}] {msg}", status.as_u16()))
             }
         }
+    }
+}
+
+fn map_redis_error(e: redis::RedisError) -> DispatchError {
+    use redis::ErrorKind as K;
+    let msg = e.to_string();
+    match e.kind() {
+        K::AuthenticationFailed => DispatchError::Auth(msg),
+        K::IoError | K::ClientError => DispatchError::Connect(msg),
+        K::TypeError | K::ResponseError => DispatchError::Protocol(msg),
+        K::ExtensionError => DispatchError::Protocol(msg),
+        _ => DispatchError::Protocol(msg),
     }
 }
 
