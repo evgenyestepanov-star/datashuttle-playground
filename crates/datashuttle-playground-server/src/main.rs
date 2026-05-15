@@ -56,13 +56,8 @@ async fn main() -> anyhow::Result<()> {
     // explicit DELETE /sessions/:id from a live client cleans them.
     let sessions = if let Some(m) = manifest.as_ref() {
         Some(
-            SessionManager::new_with_persistence(
-                m.clone(),
-                true,
-                cfg.session_ttl,
-                &cfg.data_dir,
-            )
-            .await,
+            SessionManager::new_with_persistence(m.clone(), true, cfg.session_ttl, &cfg.data_dir)
+                .await,
         )
     } else {
         None
@@ -79,31 +74,29 @@ async fn main() -> anyhow::Result<()> {
     // OSS api callback client. Optional — when either env var is
     // missing we boot without it and handlers that need it return
     // 503. Lets a partial deploy still expose health/manifest.
-    let api_client: Option<Arc<ApiClient>> = match (
-        cfg.api_base_url.as_ref(),
-        cfg.api_service_token.as_ref(),
-    ) {
-        (Some(base), Some(token)) => {
-            match ApiClient::new(base.clone(), token.clone(), cfg.api_timeout) {
-                Ok(c) => {
-                    info!(base_url = %base, "playground: api callback client configured");
-                    Some(Arc::new(c))
-                }
-                Err(e) => {
-                    warn!(error = %e, "playground: failed to build api callback client");
-                    None
+    let api_client: Option<Arc<ApiClient>> =
+        match (cfg.api_base_url.as_ref(), cfg.api_service_token.as_ref()) {
+            (Some(base), Some(token)) => {
+                match ApiClient::new(base.clone(), token.clone(), cfg.api_timeout) {
+                    Ok(c) => {
+                        info!(base_url = %base, "playground: api callback client configured");
+                        Some(Arc::new(c))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "playground: failed to build api callback client");
+                        None
+                    }
                 }
             }
-        }
-        _ => {
-            warn!(
-                "PLAYGROUND_API_BASE_URL or PLAYGROUND_SERVICE_TOKEN is unset — \
+            _ => {
+                warn!(
+                    "PLAYGROUND_API_BASE_URL or PLAYGROUND_SERVICE_TOKEN is unset — \
                  session create / reset / SQL actions will return 503 until \
                  both are provided."
-            );
-            None
-        }
-    };
+                );
+                None
+            }
+        };
 
     let state = Arc::new(ServerState {
         config: cfg.clone(),

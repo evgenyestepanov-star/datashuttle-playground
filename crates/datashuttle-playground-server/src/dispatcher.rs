@@ -97,9 +97,7 @@ impl TcpPlaygroundDispatcher {
             // Schema already validated by the caller via
             // is_safe_resource_name, so splicing is safe.
             let stmt = format!("SET LOCAL search_path = \"{}\", public", schema);
-            tx.execute(sqlx::query(&stmt))
-                .await
-                .map_err(map_pg_error)?;
+            tx.execute(sqlx::query(&stmt)).await.map_err(map_pg_error)?;
         }
         let mut stream = sqlx::raw_sql(sql).execute_many(&mut *tx);
         let mut rows: u64 = 0;
@@ -229,12 +227,14 @@ impl TcpPlaygroundDispatcher {
             for tok in tokens.iter().skip(1) {
                 cmd.arg(tok.as_str());
             }
-            let reply: redis::Value =
-                cmd.query_async(&mut conn).await.map_err(map_redis_error)?;
+            let reply: redis::Value = cmd.query_async(&mut conn).await.map_err(map_redis_error)?;
             count += 1;
             last_reply = format!("{reply:?}");
         }
-        Ok((format!("OK ({count} commands)\n{last_reply}"), String::new()))
+        Ok((
+            format!("OK ({count} commands)\n{last_reply}"),
+            String::new(),
+        ))
     }
 }
 

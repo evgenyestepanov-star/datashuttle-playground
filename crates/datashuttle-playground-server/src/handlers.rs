@@ -131,12 +131,7 @@ pub struct ActionResponse {
 // --------------------------------------------------------------------- error helpers
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        status,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
-    )
+    (status, Json(ErrorResponse { error: msg.into() }))
 }
 
 fn map_session_err(e: SessionError) -> (StatusCode, Json<ErrorResponse>) {
@@ -364,13 +359,8 @@ pub async fn create_session(
                     Ok(init_sql) => {
                         let init_sql = substitute_placeholders(&init_sql, &session);
                         let init_sql = substitute_source_coords(init_sql, Some(source));
-                        match dispatch_source_sql(
-                            &state,
-                            source,
-                            &session.namespace,
-                            &init_sql,
-                        )
-                        .await
+                        match dispatch_source_sql(&state, source, &session.namespace, &init_sql)
+                            .await
                         {
                             Ok(_) => {
                                 let _ = mgr
@@ -420,29 +410,22 @@ pub async fn create_session(
         match read_example_file(&state, shuttle_rel) {
             Ok(shuttle_sql) => {
                 let shuttle_sql = substitute_placeholders(&shuttle_sql, &session);
-                let shuttle_sql = substitute_source_coords(
-                    shuttle_sql,
-                    manifest.source(&scenario.source_id),
-                );
+                let shuttle_sql =
+                    substitute_source_coords(shuttle_sql, manifest.source(&scenario.source_id));
                 let statements = split_ds_sql_statements(&shuttle_sql);
                 let mut provision_outcome: Result<(), String> = Ok(());
                 if let Some(api) = state.api_client.as_ref() {
                     for (idx, stmt) in statements.iter().enumerate() {
                         if let Err(e) = api.exec_sql(&identity, stmt).await {
-                            provision_outcome = Err(format!(
-                                "statement #{} of {}: {e}",
-                                idx + 1,
-                                shuttle_rel,
-                            ));
+                            provision_outcome =
+                                Err(format!("statement #{} of {}: {e}", idx + 1, shuttle_rel,));
                             break;
                         }
                     }
                 } else {
-                    provision_outcome = Err(
-                        "api callback client is not configured — \
+                    provision_outcome = Err("api callback client is not configured — \
                          set PLAYGROUND_API_BASE_URL + PLAYGROUND_SERVICE_TOKEN"
-                            .to_string(),
-                    );
+                        .to_string());
                 }
                 match provision_outcome {
                     Ok(()) => {
@@ -645,8 +628,7 @@ pub async fn reset_session(
                 let init_sql = substitute_source_coords(init_sql, source.as_ref());
                 if let Some(source) = source {
                     if let Err(e) =
-                        dispatch_source_sql(&state, &source, &session.namespace, &init_sql)
-                            .await
+                        dispatch_source_sql(&state, &source, &session.namespace, &init_sql).await
                     {
                         warn!(session_id = %id, "reset: init_sql failed: {e}");
                     }
@@ -662,10 +644,8 @@ pub async fn reset_session(
         match read_example_file(&state, shuttle_rel) {
             Ok(shuttle_sql) => {
                 let shuttle_sql = substitute_placeholders(&shuttle_sql, &session);
-                let shuttle_sql = substitute_source_coords(
-                    shuttle_sql,
-                    manifest.source(&scenario.source_id),
-                );
+                let shuttle_sql =
+                    substitute_source_coords(shuttle_sql, manifest.source(&scenario.source_id));
                 for (idx, stmt) in split_ds_sql_statements(&shuttle_sql)
                     .into_iter()
                     .enumerate()
@@ -783,14 +763,7 @@ pub async fn execute_action(
             r.body.clone(),
             None,
         ),
-        Err(e) => (
-            "error".to_string(),
-            None,
-            None,
-            None,
-            None,
-            Some(e.clone()),
-        ),
+        Err(e) => ("error".to_string(), None, None, None, None, Some(e.clone())),
     };
 
     // Record into session event log.
@@ -1017,8 +990,7 @@ async fn produce_kafka(
         std::env::var("DS_KAFKA_PLAYGROUND_HOST").unwrap_or_else(|_| "redpanda-playground".into());
     let port = std::env::var("DS_KAFKA_PLAYGROUND_REST_PORT").unwrap_or_else(|_| "8082".into());
     let broker = std::env::var("DS_KAFKA_PLAYGROUND_BROKER").unwrap_or_else(|_| {
-        let native = std::env::var("DS_KAFKA_PLAYGROUND_PORT")
-            .unwrap_or_else(|_| "9092".into());
+        let native = std::env::var("DS_KAFKA_PLAYGROUND_PORT").unwrap_or_else(|_| "9092".into());
         format!("{host}:{native}")
     });
 
@@ -1136,7 +1108,8 @@ async fn upload_file(payload_file: &str, session: &Session) -> Result<(String, S
     validate_example_relative_path(payload_file)?;
     let bucket = s3_bucket_for(session);
 
-    let endpoint = std::env::var("DS_MINIO_ENDPOINT").unwrap_or_else(|_| "http://minio:9000".into());
+    let endpoint =
+        std::env::var("DS_MINIO_ENDPOINT").unwrap_or_else(|_| "http://minio:9000".into());
     let access = std::env::var("DS_MINIO_ACCESS_KEY")
         .or_else(|_| std::env::var("MINIO_ROOT_USER"))
         .map_err(|_| "missing DS_MINIO_ACCESS_KEY / MINIO_ROOT_USER".to_string())?;
@@ -1302,11 +1275,9 @@ async fn dispatch_source_sql(
             match result {
                 Ok(out) => return Ok(out),
                 Err(DispatchError::Unavailable) => {
-                    return Err(
-                        "redis dispatcher unavailable — cloud playground requires \
+                    return Err("redis dispatcher unavailable — cloud playground requires \
                          DS_REDIS_PLAYGROUND_HOST + redis-playground sidecar"
-                            .into(),
-                    )
+                        .into())
                 }
                 Err(other) => return Err(other.to_string()),
             }
@@ -1631,8 +1602,8 @@ fn substitute_placeholders(s: &str, session: &Session) -> String {
     // S3 / MinIO substitutions for file scenarios. Cloud deployments
     // pass real credentials via DS_MINIO_*; standalone demos default
     // to `minioadmin` / `minioadmin`.
-    let minio_endpoint = std::env::var("DS_MINIO_ENDPOINT")
-        .unwrap_or_else(|_| "http://minio:9000".into());
+    let minio_endpoint =
+        std::env::var("DS_MINIO_ENDPOINT").unwrap_or_else(|_| "http://minio:9000".into());
     let minio_access = std::env::var("DS_MINIO_ACCESS_KEY")
         .or_else(|_| std::env::var("MINIO_ROOT_USER"))
         .unwrap_or_else(|_| "minioadmin".into());
@@ -1885,9 +1856,7 @@ async fn teardown_session(
         // purge so iceberg tables and their parquet files are
         // removed. Plain `DROP NAMESPACE` only updates the in-memory
         // namespace manager.
-        let path = format!(
-            "/api/v1/catalog/namespaces/{namespace}?cascade=true&purge=true"
-        );
+        let path = format!("/api/v1/catalog/namespaces/{namespace}?cascade=true&purge=true");
         if let Err(e) = api.request("DELETE", &path, None, identity).await {
             warn!(
                 namespace = %namespace,
@@ -1984,11 +1953,7 @@ async fn teardown_session(
                 );
             }
         }
-        if let Err(e) = state
-            .dispatcher
-            .teardown_redis_namespace(namespace)
-            .await
-        {
+        if let Err(e) = state.dispatcher.teardown_redis_namespace(namespace).await {
             if !matches!(e, DispatchError::Unavailable) {
                 warn!(
                     namespace = %namespace,
@@ -2022,8 +1987,13 @@ async fn purge_s3_namespace(namespace: &str) -> Result<(), String> {
     let warehouse_bucket = std::env::var("DS_WAREHOUSE")
         .ok()
         .and_then(|s| {
-            s.strip_prefix("s3://")
-                .map(|rest| rest.trim_end_matches('/').split('/').next().unwrap_or("").to_string())
+            s.strip_prefix("s3://").map(|rest| {
+                rest.trim_end_matches('/')
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "warehouse".into());
@@ -2244,9 +2214,7 @@ pub async fn sweep_api_orphans(state: Arc<ServerState>) {
 /// so any drift in name derivation that introduces punctuation fails
 /// closed.
 fn is_safe_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 128
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 // --------------------------------------------------------------------- tests

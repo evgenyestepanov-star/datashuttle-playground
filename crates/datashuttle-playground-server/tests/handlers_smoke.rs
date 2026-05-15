@@ -55,9 +55,7 @@ fn test_state() -> Arc<ServerState> {
     };
 
     let prom_registry = Arc::new(Registry::new());
-    let metrics = Arc::new(
-        PlaygroundMetrics::new(&prom_registry).expect("register metrics"),
-    );
+    let metrics = Arc::new(PlaygroundMetrics::new(&prom_registry).expect("register metrics"));
 
     let sessions = Some(SessionManager::new(
         manifest.clone(),
@@ -168,5 +166,8 @@ async fn manifest_is_reachable_without_identity() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(v["scenarios"].is_array(), "scenarios array should be present");
+    assert!(
+        v["scenarios"].is_array(),
+        "scenarios array should be present"
+    );
 }
