@@ -159,7 +159,7 @@ services:
   # ── DataShuttle ─────────────────────────────────────────
 
   datashuttle:
-    image: ghcr.io/datashuttle-ai/datashuttle:latest
+    image: ghcr.io/datashuttle-io/datashuttle:latest
     ports:
       - "8080:8080"
       - "9090:9090"

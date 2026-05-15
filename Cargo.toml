@@ -10,8 +10,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "LicenseRef-Proprietary"
-repository = "https://github.com/evgenyestepanov-star/datashuttle-playground"
-homepage = "https://github.com/evgenyestepanov-star/datashuttle-playground"
+repository = "https://github.com/datashuttle-io/datashuttle-playground"
+homepage = "https://github.com/datashuttle-io/datashuttle-playground"
 keywords = ["datashuttle", "playground", "sandbox", "demo"]
 categories = ["database", "development-tools"]
 
