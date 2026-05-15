@@ -336,6 +336,99 @@
       ]
     },
     {
+      "id": "postgres-cdc-fanout",
+      "source_id": "postgres",
+      "title": "PostgreSQL CDC — multi-table fan-out",
+      "description": "One CDC connection, five source tables (customers / products / orders / order_items / payments), five Iceberg targets. Walks an end-to-end transaction: seed a customer, seed a product, place an order, attach line items (3 rows from a single source INSERT), record the payment. Each step exercises a different fan-out branch and the catalog lineage view shows the resulting 5-table topology.",
+      "difficulty": "intermediate",
+      "tier": 1,
+      "status": "stable",
+      "tags": [
+        "cdc",
+        "fan-out",
+        "multi-table",
+        "postgres"
+      ],
+      "prerequisites": {
+        "deployment": [
+          "dev",
+          "self-managed",
+          "cloud"
+        ],
+        "profiles": [],
+        "min_memory_mb": 1024
+      },
+      "init_sql": "postgres-cdc/init.sql",
+      "shuttle_sql": "playground/postgres-cdc/shuttle.sql",
+      "estimated_duration_s": 300,
+      "actions": [
+        {
+          "id": "seed-customer",
+          "label": "Seed customer (branch 1/5)",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/seed-customer.sql"
+        },
+        {
+          "id": "seed-product",
+          "label": "Seed product (branch 2/5)",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/seed-product.sql"
+        },
+        {
+          "id": "place-order",
+          "label": "Place order (branch 3/5)",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/insert-order.sql"
+        },
+        {
+          "id": "attach-line-items",
+          "label": "Attach 3 line items (branch 4/5)",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/attach-line-items.sql"
+        },
+        {
+          "id": "mark-paid",
+          "label": "Record payment (branch 5/5)",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/mark-paid.sql"
+        },
+        {
+          "id": "burst-100",
+          "label": "Burst: 100 orders",
+          "kind": "sql",
+          "target": "source",
+          "sql_file": "postgres-cdc/actions/burst-100.sql"
+        }
+      ],
+      "break_scenarios": [
+        {
+          "id": "drop-column",
+          "label": "Drop a tracked column",
+          "kind": "sql",
+          "target": "source",
+          "sql": "ALTER TABLE orders DROP COLUMN status;",
+          "destructive": true
+        }
+      ],
+      "expected_outcomes": [
+        {
+          "metric": "rows_landed",
+          "assertion": "gte",
+          "value": 5
+        },
+        {
+          "metric": "dlq_count",
+          "assertion": "eq",
+          "value": 0
+        }
+      ]
+    },
+    {
       "id": "postgres-schema-evolution",
       "source_id": "postgres",
       "title": "Schema evolution — ADD / DROP / RENAME",
