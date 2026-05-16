@@ -4,15 +4,13 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
   "include-v-in-tag": true,
+  "include-component-in-tag": false,
   "packages": {
     ".": {
       "package-name": "datashuttle-playground",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        {
-          "type": "generic",
-          "path": "Cargo.toml"
-        }
+        { "type": "generic", "path": "Cargo.toml" }
       ]
     }
   }
