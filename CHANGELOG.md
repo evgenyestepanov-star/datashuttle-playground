@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/datashuttle-io/playground/compare/v0.2.0...v0.3.0) (2026-05-18)
+
+
+### Features
+
+* **acceptance:** scaffold playground acceptance suite (Sprint 4) ([79a2cb8](https://github.com/datashuttle-io/playground/commit/79a2cb8c4909cd701f663b434ee85b45d6ad9f66))
+* **acceptance:** wire 6 remaining scenarios (Sprint 6) ([1e12f79](https://github.com/datashuttle-io/playground/commit/1e12f794ef40a6298e83c58ca17494538f8ff80a))
+* **ci:** wire acceptance workflow (Sprint 4 follow-up) ([86ff773](https://github.com/datashuttle-io/playground/commit/86ff7731d241e58b911b828089674f7614e11e23))
+
+
+### Bug Fixes
+
+* **ci:** switch playground image to ghcr; allow-fail crates.io step ([9a5f5e7](https://github.com/datashuttle-io/playground/commit/9a5f5e7505b83f0b8721e2c1981bd08ba89f002a))
+
 ## [0.2.0](https://github.com/datashuttle-io/playground/compare/datashuttle-playground-v0.1.0...datashuttle-playground-v0.2.0) (2026-05-15)
 
 
